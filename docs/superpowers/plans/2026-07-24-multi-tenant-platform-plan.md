@@ -3921,13 +3921,396 @@ After writing each task, verify:
 | §10 Frontend | Tasks 66-78 |
 | §11 Deployment | Tasks 79-85 |
 
-## Execution Handoff
+---
 
-**Plan complete and saved to `docs/superpowers/plans/2026-07-24-multi-tenant-platform-plan.md`.**
+## Appendix A: Original User Inquiry
 
-Two execution options:
+Bu plan, aşağıdaki kullanıcı talebi üzerine oluşturuldu (Türkçe, sadeleştirilmiş):
 
-**1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration
-**2. Inline Execution** — Execute tasks in this session using executing-plans, batch execution with checkpoints
+> "Bu projeyi (ApexAITeam) baştan yapmak istiyorum. Dilde Python'a dönmeliyim. Şu anki projeyi düzeltmek istemiyorum. Tool executor için en iyi yöntemi, code editing yöntemlerimi incelemeni istiyorum. ProcessStateMachine'lerim yerli mi, en iyi nasıl yönetilir? Farklı agentlar nasıl çalışmalı — tek bir AI agent'la ortak system prompt + tool execute mü, yoksa her iş için özel ajanlar mı, yoksa her iş için farklı ajanlar ayrı ayrı mı? Agent çalışma yapısı nasıl olmalı, queue'dan iş mi akmalı? Her işin konuşma geçmişi MongoDB'de mi DB'de mi? Aynı AI agent API ile uzun konuşmaları nasıl yönetmeliyim? Bir task geliştirilirken Azure/GitHub Boards gibi status, hangi agent ne yaptı gibi işlem geçmişini nasıl tutmalıyım? Başarısız olunca maliyeti artırmayacak şekilde AI API'leri nasıl kullanmalıyım? VS Code'da Copilot gibi gerekli toolları bilgisayara kurabiliyor, ama ben bunu Linux k8s'te çalıştıracağım — React Native dahil tüm diller için build testleri nasıl yapmalıyım? Yani kodu yazdım deyip build hatası alan kodu göndermemeliyim. Hadi sağlam baştan yeni bir şeye başlayalım, shadcn kullanacağız ön yüz için. Tüm model protokolleri ile çalışabileceğiz — OpenAI compatible, Anthropic gibi iletişim API protokolleri kullanacağız. Input/output token kullanımları gibi bilgileri session içinde ve gerekli databaselerimizde tutacağız. Aynı zamanda heuristic → semantic → LightGBM → LLM gibi yöntemler kullanacağız. Projeyi şu hale getirmek istiyorum: müşterilerim, müşterilerimin kullanıcıları ve kullanıcılar siteme girdiğinde GitHub settings gibi bir yerden GitHub access keyleri, Telegram entegrasyonu, Azure access keyleri olacak. İsterlerse şirketlerinin AI API keylerini kullanacaklar, isterlerse kendi API keylerini ekleyebilecekleri. Müşterilerimin admin kullanıcısı, yönetici kullanıcısı, normal yazılımcı, analist, teknik destek, insan kaynakları kullanıcı tipleri olacak. Tüm settingsleri, gerekirse kişilerin ki yöneticiler yönlendirebilecek."
 
-Which approach?
+**Bu talep 7 alt-sistem olarak ayrıştırıldı. Bu plan sadece F'i (Multi-tenant Platform) kapsıyor. Diğerleri aşağıda (Appendix B) özetlendi.**
+
+---
+
+## Appendix B: Other Sub-Systems (A, B, C, D, E, G)
+
+Bu plan F'i (Multi-tenant Platform) kapsar. Aşağıdaki sub-system'ler ayrı brainstorming turları ve planlar gerektirir. Burada sadece yüksek seviye gereksinimler özetleniyor — her biri kendi spec + plan turlarında detaylandırılacak.
+
+### B.1 Sub-System A: Agent Runtime
+
+**Amaç:** AI agent'ların çalıştığı runtime — model protokol abstraction, tool execution, conversation memory.
+
+**Temel gereksinimler (kullanıcı kaynaklı):**
+- Tüm model protokolleri ile çalışacak: OpenAI compatible, Anthropic API
+- Code editing için en iyi yöntem (araştırılacak — Rocket, Morph, Aider, Continue gibi projeler incelenecek)
+- Token kullanımı (input/output) session içinde ve DB'de tutulacak
+- Uzun konuşmalar için conversation memory stratejisi (trimming, summarization, offload)
+
+**Açık sorular (ayrı brainstorming gerekir):**
+- Tek AI agent + function calling vs çoklu specialized agent?
+- Her task için ayrı agent runtime süreçleri mi, yoksa tek bir runtime içinde rollere mi?
+- Task başına yeni session mı, yoksa persistent session mı?
+
+**Anahtar kararlar:**
+- Multi-provider abstraction (LiteLLM vs custom)
+- Conversation storage (PostgreSQL jsonb vs MongoDB)
+- Tool execution: sandboxed subprocess vs container
+
+**F ile etkileşim:** AI API key'leri F'ten (`api_keys` tablosu, Vault'tan) çekilir. Token usage tracking `token_usage` tablosuna yazılır.
+
+### B.2 Sub-System B: Workflow Orchestration
+
+**Amaç:** Task pipeline, state machine, queue, worker pool, retry, DLQ.
+
+**Temel gereksinimler:**
+- Durum makinesi: ProcessStateMachine'in yerli mi olduğu değerlendirilecek (mevcut .NET implementasyonu 757 satır — çok mu?)
+- Queue: Redis (ARQ) vs BullMQ vs Celery vs custom
+- Worker pool: event-driven dispatch with backpressure
+- Retry: exponential backoff, max retries, DLQ
+- Circuit breaker: failed tools × N → alternative path
+
+**Açık sorular:**
+- Queue database mi (PostgreSQL SKIP LOCKED) yoksa Redis mi?
+- Worker'lar aynı process mi yoksa ayrı deployment mı?
+- State machine library (transitions, statemachine) vs custom
+
+**F ile etkileşim:** Her task bir `process_runs` (created in F) altında çalışır. Status değişiklikleri F'in `audit_log` tablosuna yazılır.
+
+### B.3 Sub-System C: Task Tracking Dashboard
+
+**Amaç:** Azure DevOps / GitHub Projects tarzı UI — task status, hangi agent ne yaptı, timeline.
+
+**Temel gereksinimler:**
+- Kanban board: Queued → Planning → Developing → Validating → Building → Pushing → PR → Done
+- Task detay sayfası: tüm agent'ların aktiviteleri (DualLog'dan)
+- Real-time updates (WebSocket veya SSE)
+- Filtering: by org, by team, by status, by owner
+- Comments/notes (user feedback)
+
+**F ile etkileşim:** `process_runs` ve `audit_log` tablolarından okur. RBAC (Permission) ile filtreleme.
+
+### B.4 Sub-System D: Cost Optimization
+
+**Amaç:** AI API maliyetini minimize et — başarısız task'ta pahalı çağrı yapma.
+
+**Routing cascade (kullanıcı isteği):**
+```
+heuristic → semantic → LightGBM → LLM
+```
+
+1. **Heuristic:** Basit kural-tabanlı (regex, pattern matching). Maliyet: 0.
+2. **Semantic:** Embedding bazlı benzerlik skoru. Maliyet: embedding API call (düşük).
+3. **LightGBM:** ML model — feature'lar üzerinden classification. Maliyet: model inference (çok düşük).
+4. **LLM:** Son çare, pahalı ama yetenekli. Maliyet: yüksek.
+
+**Diğer maliyet stratejileri:**
+- Token budget per user/org
+- Rate limiting per provider
+- Caching: aynı soruya aynı cevap (Redis)
+- Cascading: önce küçük model dene, başarısızsa büyük model
+- Fail-fast: ilk basit yöntemde güvenilir cevap varsa LLM'i hiç çağırma
+
+**Required data:** `token_usage` tablosu (F'te), outcome/feedback tablosu (eklenecek)
+
+**F ile etkileşim:** Provider/model seçimi `settings` (F) üzerinden configure edilir.
+
+### B.5 Sub-System E: Build/Test Pipeline
+
+**Amaç:** Kod yazıldıktan sonra, deployment öncesi build/lint/test/syntax doğrulama — TÜM diller için.
+
+**Temel gereksinimler:**
+- Çok-dilli: React Native, Node, Python, Go, Rust, Java, .NET (k8s'te container-based)
+- k8s'te sandbox runner: yeni pod aç, build çalıştır, sonucu raporla
+- Auto-detect: proje tipi (package.json, pyproject.toml, go.mod, Cargo.toml, pom.xml)
+- Build cache: incremental builds
+- Artifact storage: Docker images / binary artifacts
+
+**Açık sorular:**
+- Sandbox: k8s ephemeral pod vs container-per-task vs Firecracker?
+- Resource limits: CPU/memory per language
+- Local cache: how to share across builds?
+
+**F ile etkileşim:** Build sonuçları `audit_log`'a yazılır. Container runtime settings `orgs.settings` JSONB'de.
+
+### B.6 Sub-System G: Frontend (Full)
+
+**Amaç:** Next.js 14 + shadcn tam UI — Dashboard, Tasks, Settings, Admin, Agent Chat.
+
+**Kapsam:**
+- (this plan F için) minimal scaffolding: login, invite, basic org/team/user/key/settings pages
+- (G sub-system) tam UI: agent chat interface, task kanban, real-time updates, agent timeline, settings panels, admin dashboard
+
+**F ile etkileşim:** Tam UI F'in API'lerini consume eder. Auth middleware (F'te) cookie-based session'ı kullanır.
+
+---
+
+## Appendix C: Additional Requirements (Maliyet Optimizasyonu + Auto Mode)
+
+Kullanıcının sonradan eklediği gereksinimler — F'e ve tüm sisteme dokunan ek konular.
+
+### C.1 Auto Mode (Cline / OpenCode / KiloCode Entegrasyonu)
+
+**Amaç:** Kullanıcı, "auto mod" deneyimini Cursor'daki gibi yaşayacak. Farklı IDE/agent tool'ları (Cline, OpenCode, KiloCode vb.) ApexAI'ın LLM API'sini kullanacak.
+
+**Akış:**
+```
+[Cline/OpenCode/KiloCode]  ──HTTPS──▶  [ApexAI LLM Gateway API]
+                                              │
+                                              ▼
+                                     [A: Agent Runtime]
+                                              │
+                                              ▼
+                                     [F: Key Vault + User AI Keys]
+```
+
+**Gereksinimler:**
+- **Public LLM API endpoint:** `POST /api/v1/llm/chat/completions` — OpenAI uyumlu
+- **API token auth:** Her user/org için `llm_api_tokens` tablosu (F'e eklenir)
+- **BYOK passthrough:** External tool'tan gelen istek, user/org'un API key'ini kullanır
+- **Usage tracking:** Her external call `token_usage` tablosuna yazılır
+- **Rate limiting:** Per-token, per-user, per-org
+- **Streaming:** SSE (Server-Sent Events) ile streaming response
+
+**DB değişikliği (F'e ekleme):**
+```sql
+CREATE TABLE llm_api_tokens (
+    id UUID PRIMARY KEY,
+    org_id UUID REFERENCES orgs(id),
+    user_id UUID REFERENCES users(id),
+    name VARCHAR(255),
+    token_hash VARCHAR(255) UNIQUE NOT NULL,
+    scopes TEXT[],  -- ['chat', 'embeddings', 'tools']
+    last_used_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+**RBAC:** Yeni permission `LLM_API_USE = "llm:api:use"` — Developer + Manager + Admin
+
+### C.2 Vector Embeddings (DB-Embedded)
+
+**Amaç:** Code, conversation, document semantik araması.
+
+**Storage stratejisi:**
+- PostgreSQL + `pgvector` extension (önerilen)
+- Veya dedicated vector DB (Qdrant, Weaviate — ayrı servis)
+
+**pgvector (önerilen):** PostgreSQL'de kalır, ek operasyonel yük yok.
+
+**Tablolar:**
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE embeddings (
+    id UUID PRIMARY KEY,
+    owner_type VARCHAR(32),  -- 'code', 'conversation', 'document'
+    owner_id UUID,           -- soft ref
+    org_id UUID REFERENCES orgs(id),
+    user_id UUID REFERENCES users(id),  -- user-specific embeddings
+    embedding vector(1536),  -- OpenAI text-embedding-3-small
+    content TEXT,            -- raw text
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX ON embeddings USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+```
+
+**Kullanım:**
+- Code search: semantic
+- Conversation history: long-term memory
+- Document QA: RAG pipeline
+
+**User-specific:** `user_id` ile her user'ın kendi embedding'leri. Org admin tümünü görebilir.
+
+### C.3 User-Level Adaptation Models (User Bazlı Toparlama)
+
+**Amaç:** Her user'ın etkileşim geçmişinden öğrenme.
+
+**Toparlama (aggregation) akışı:**
+```
+[User Actions] → [Events Log] → [Aggregator] → [User Profile Embedding]
+                                              ↓
+                                    [Prompt Augmentation]
+                                              ↓
+                                    [Personalized LLM Response]
+```
+
+**Tablolar (F'e ekleme):**
+```sql
+CREATE TABLE user_feedback (
+    id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(id),
+    target_type VARCHAR(32),  -- 'task', 'message', 'plan'
+    target_id UUID,
+    rating INTEGER,  -- 1-5
+    comment TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE user_preferences (
+    id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(id) UNIQUE,
+    style_profile JSONB,  -- tone, verbosity, code style
+    preferred_model VARCHAR(64),
+    preferred_language VARCHAR(8),
+    custom_instructions TEXT,
+    updated_at TIMESTAMPTZ
+);
+
+CREATE TABLE user_behavior_stats (
+    id UUID PRIMARY KEY,
+    user_id UUID REFERENCES users(id) UNIQUE,
+    total_tasks INTEGER,
+    avg_rating DECIMAL(3, 2),
+    task_categories JSONB,  -- {frontend: 30, backend: 50, ...}
+    time_patterns JSONB,    -- saat dilimleri, sıklık
+    updated_at TIMESTAMPTZ
+);
+```
+
+**Pipeline (A + D kapsamında):**
+1. User etkileşimleri `user_feedback`'e yazılır
+2. Günlük aggregator job'u `user_preferences` günceller
+3. LLM call'larında `user_preferences.style_profile` system prompt'a eklenir
+4. A/B testing: aynı task için preferred vs default style
+
+**Öğrenme stratejileri:**
+- **Immediate:** Son feedback'den direkt öğren (regex kuralları)
+- **Batch:** Günlük/haftalık fine-tune (embedding-based clustering)
+- **Online:** Streaming update (her interaction sonrası küçük güncelleme)
+
+### C.4 LightGBM Model Serving
+
+**Amaç:** Routing cascade'in 3. katmanı — feature-based classification.
+
+**Senaryo:** "Bu task developer'ın mı yoksa analyst'in mi görevi?" → bir LLM çağırmadan cevapla.
+
+**Feature'lar:**
+- Task title token frequency
+- Task body length
+- Code file mentions
+- User history (past role assignments)
+- Time of day / day of week
+
+**Serving:**
+- ONNX runtime + Python (low-latency inference)
+- Model versioning (MLflow veya DVC)
+- Per-tenant model option (advanced)
+
+**F ile etkileşim:** Model feature'ları `audit_log` ve `user_behavior_stats`'tan çekilir.
+
+### C.5 Heuristic Routing
+
+**Amaç:** Sıfır maliyetli pattern matching ile task sınıflandırma.
+
+**Örnek kurallar:**
+- "fix typo in readme.md" → trivial, no agent needed
+- "refactor database migrations" → DEVELOPER role
+- "create architecture diagram" → ANALYST role
+- "investigate why X" → TECH_SUPPORT role
+
+**Implementation:**
+- Pure Python `re` patterns + decision tree
+- 100+ rule, easy to maintain
+- Confidence threshold: < 0.7 → escalate to semantic
+
+---
+
+## Appendix D: Next Steps After This Plan
+
+Bu plan (F) tamamlandıktan sonra, kullanıcı başka bir session'da devam edecek.
+
+### D.1 Immediate Next Steps (This Plan)
+
+**Senaryo:** Kullanıcı bu plan'ı başka bir session'da execute edecek.
+
+1. **Phase 0'ı başlat** (Tasks 1-7): Bootstrap — repo, uv, docker-compose, FastAPI skeleton
+2. **Test infrastructure doğrula:** Docker dev infra ayakta mı, migration çalışıyor mu
+3. **Phase 1'i başlat** (Tasks 8-22): Tüm 15 DB modeli + RLS + indexes
+4. **Her phase'i bitir, commit at, sonrakine geç**
+
+**Phase 0-1 arası durum:** DB ve migrations hazır, app skeleton ayakta. Phase 2'ye geçmeden önce `uv run alembic upgrade head` çalıştığını doğrula.
+
+**Phase 2-3 (Auth):** JWT login/logout/refresh çalışmalı. Manuel test: curl ile `/api/v1/auth/login` → token al.
+
+**Phase 4-5:** Org/team/user/key vault API'leri hazır. Integration testleri ile.
+
+**Phase 6-7:** Settings + audit + frontend pages.
+
+**Phase 8:** Deployment.
+
+### D.2 After F (Sub-Systems A-G)
+
+F tamamen çalıştığında:
+
+1. **A sub-system brainstorming:** Agent Runtime — multi vs single agent, tool execution, model abstraction
+2. **B sub-system brainstorming:** Workflow — state machine temizliği, queue seçimi
+3. **C sub-system brainstorming:** Task Dashboard UI
+4. **D sub-system brainstorming:** Cost Optimization — heuristic → semantic → LightGBM → LLM cascade detayı
+5. **E sub-system brainstorming:** Build/Test Pipeline — k8s sandbox runner
+6. **G sub-system brainstorming:** Tam Frontend UI
+
+**Her sub-system için:**
+- Ayrı brainstorming (1-2 tur)
+- Ayrı design spec
+- Ayrı implementation plan
+- F'in API'lerine entegre
+
+### D.3 Cross-Cutting Features (Appendix C)
+
+Eklenen gereksinimler (LLM gateway, embeddings, user adaptation) F sub-system'ini tamamladıktan SONRA eklenir:
+
+1. **LLM Gateway API:** Yeni tablolar (`llm_api_tokens`) + endpoint grup
+2. **Vector Embeddings:** pgvector extension + yeni tablolar
+3. **User Adaptation:** Aggregator job + preferences tablosu
+4. **LightGBM Serving:** Model artifact + serving worker
+5. **Heuristic Routing:** Rule engine + decision tree
+
+**Sıralama:** LLM Gateway → Embeddings → User Adaptation → ML → Heuristic
+
+### D.4 Open Questions for Next Session
+
+1. **A: Multi-agent vs single-agent?** — Hala karar verilmedi. Bu büyük bir mimari karar.
+2. **B: Queue database?** — PostgreSQL SKIP LOCKED (F'in pattern'i) vs Redis (daha hızlı)
+3. **D: Heuristic kuralları** — 100 kural tek başına yeterli mi, yoksa LLM-as-judge mi?
+4. **E: k8s sandbox modeli** — Ephemeral pod vs warm pool vs Firecracker
+5. **G: SSR vs SPA** — Spec'te Next.js App Router (SSR) alındı, performans doğrulanmalı
+
+### D.5 Session Continuity Notes
+
+**Bu plan tek başına complete değildir (F sub-system scope).** Tam implementasyon için:
+- 85 task (F) + ~300 task (A, B, C, D, E, G, ek features) = ~385 task toplam
+- Tahmini süre: 4-6 hafta (full-time engineer, 1 kişi)
+- Token budget: ~2-3M tokens (subagent-driven execution)
+
+**Kullanıcı planı farklı session'larda execute edecek.** Her session'da:
+- `apexai/docs/superpowers/specs/2026-07-24-multi-tenant-platform-design.md` (zaten mevcut)
+- `apexai/docs/superpowers/plans/2026-07-24-multi-tenant-platform-plan.md` (bu dosya)
+- `apexai/docs/superpowers/specs/` (gelecek spec'ler)
+- `apexai/docs/superpowers/plans/` (gelecek planlar)
+
+**Kullanıcı başka session'da Claude'a şöyle başlayabilir:**
+> "Bu plan dosyasını oku: `apexai/docs/superpowers/plans/2026-07-24-multi-tenant-platform-plan.md`. Phase X'ten devam et. Önceki commit'leri kontrol et, hangi task'lar tamamlanmış gör."
+
+---
+
+## Appendix E: Final Self-Review
+
+**Plan kapsamı:**
+- ✅ 85 task, 8 phases
+- ✅ TDD her task'ta (test → fail → implement → pass → commit)
+- ✅ Spec coverage tablosu (her spec bölümü implement edilmiş)
+- ✅ Critical bug fix'ler (Cookie() decorator on refresh/logout)
+- ✅ Self-review checklist dahil
+
+**Plan dışı bırakılan / ileride:**
+- ⚠️ A, B, C, D, E, G sub-system'leri (Appendix B'de özetlendi)
+- ⚠️ LLM Gateway, Embeddings, User Adaptation (Appendix C'de özetlendi)
+- ⚠️ Real email sending (SMTP/SES) — F'te sadece log
+- ⚠️ 2FA, SSO — ileride
+- ⚠️ Billing — ileride
+
+**Hazır.** Execution için kullanıcı onayı bekleniyor veya başka session'da devam edilecek.
