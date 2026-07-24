@@ -2,6 +2,8 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.invitations import router as invitations_router
+from app.api.v1.orgs import router as orgs_router
 from app.config import get_settings
 from app.deps import get_current_user
 
@@ -25,6 +27,8 @@ app.add_middleware(
 )
 
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(orgs_router, prefix="/api/v1")
+app.include_router(invitations_router, prefix="/api/v1")
 
 
 @app.get("/health")
