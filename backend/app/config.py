@@ -35,6 +35,7 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://localhost:8000",
     ]
+    cookie_secure: bool = False  # True in prod (HTTPS only)
 
     # Invite / tokens TTL
     invite_ttl_days: int = 7
