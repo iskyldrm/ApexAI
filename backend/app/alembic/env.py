@@ -13,23 +13,23 @@ from sqlmodel import SQLModel
 from app.config import get_settings
 
 # Import all models so they register with SQLModel.metadata
-# (Phase 1 task 8-22 will populate these)
-# from app.models.platform_admin import PlatformAdmin  # noqa: F401
-# from app.models.user import User  # noqa: F401
-# from app.models.org import Org  # noqa: F401
-# from app.models.team import Team  # noqa: F401
-# from app.models.membership import OrgMembership, TeamMembership  # noqa: F401
-# from app.models.invitation import Invitation  # noqa: F401
-# from app.models.api_key import ApiKey  # noqa: F401
-# from app.models.integration import IntegrationCredential  # noqa: F401
-# from app.models.audit_log import AuditLog  # noqa: F401
-# from app.models.setting import Setting  # noqa: F401
-# from app.models.token_usage import TokenUsage  # noqa: F401
-# from app.models.auth_token import (  # noqa: F401
-#     PasswordResetToken,
-#     EmailVerificationToken,
-#     RefreshToken,
-# )
+from app.models import (  # noqa: F401
+    ApiKey,
+    AuditLog,
+    EmailVerificationToken,
+    IntegrationCredential,
+    Invitation,
+    Org,
+    OrgMembership,
+    PasswordResetToken,
+    PlatformAdmin,
+    RefreshToken,
+    Setting,
+    Team,
+    TeamMembership,
+    TokenUsage,
+    User,
+)
 
 config = context.config
 
