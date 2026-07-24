@@ -48,3 +48,6 @@ logs/
 # Test artifacts
 test-results/
 .playwright/
+
+# uv
+backend/uv.lock
