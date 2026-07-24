@@ -31,6 +31,9 @@ dev = [
     "mypy>=1.13.0",
     "testcontainers[postgres,vault,redis]>=4.8.0",
 ]
+async = [
+    "psycopg2-binary>=2.9.0",
+]
 
 [tool.ruff]
 line-length = 100
