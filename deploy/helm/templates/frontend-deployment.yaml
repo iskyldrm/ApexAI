@@ -1,0 +1,56 @@
+{{- if .Values.frontend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "apexai.fullname" . }}-frontend
+  labels:
+    app: {{ include "apexai.name" . }}-frontend
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ include "apexai.name" . }}-frontend
+  template:
+    metadata:
+      labels:
+        app: {{ include "apexai.name" . }}-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
+          imagePullPolicy: {{ .Values.frontend.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_BASE_URL
+              value: {{ .Values.frontendEnv.next_public_api_base_url | quote }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources: {{- toYaml .Values.frontendResources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "apexai.fullname" . }}-frontend
+  labels:
+    app: {{ include "apexai.name" . }}-frontend
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ include "apexai.name" . }}-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

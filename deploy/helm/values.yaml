@@ -1,0 +1,62 @@
+# Default values for apexai.
+# Override per-env with -f values.prod.yaml etc.
+
+image:
+  repository: apexai/api
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+frontend:
+  image:
+    repository: apexai/frontend
+    tag: "0.1.0"
+    pullPolicy: IfNotPresent
+  enabled: true
+
+replicaCount: 3
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+frontendResources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+env:
+  app_env: production
+  database_url: postgresql+psycopg://apexai:CHANGEME@postgres:5432/apexai
+  vault_url: http://vault:8200
+  vault_token: CHANGEME
+  redis_url: redis://redis:6379/0
+  jwt_secret: CHANGEME-32-BYTES-MINIMUM
+  cookie_secure: "true"
+  cors_origins: "https://app.example.com"
+  metrics_enabled: "true"
+
+frontendEnv:
+  next_public_api_base_url: https://api.example.com
+
+ingress:
+  enabled: true
+  className: nginx
+  api:
+    host: api.example.com
+    tls: true
+  app:
+    host: app.example.com
+    tls: true
