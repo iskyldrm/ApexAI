@@ -1,5 +1,11 @@
 import { apiFetch } from "@/lib/api";
 import type {
+  AgentRole,
+  AgentRun,
+  AgentRunDetail,
+  ConverseResponse,
+} from "@/lib/agent-types";
+import type {
   ApiKey,
   AuditLogEntry,
   Integration,
@@ -113,4 +119,29 @@ export const audit = {
       `/audit-log${qs.toString() ? `?${qs.toString()}` : ""}`,
     );
   },
+};
+
+export const agent = {
+  converse: (body: {
+    role: AgentRole;
+    prompt: string;
+    work_dir: string;
+    org_id?: string;
+    max_steps?: number;
+    model_override?: string;
+  }) =>
+    apiFetch<ConverseResponse>("/agent/converse", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  listRuns: (params: { org_id?: string; role?: string; status?: string } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      if (v) qs.set(k, v);
+    }
+    return apiFetch<{ items: AgentRun[] }>(
+      `/agent/runs${qs.toString() ? `?${qs.toString()}` : ""}`,
+    );
+  },
+  getRun: (id: string) => apiFetch<AgentRunDetail>(`/agent/runs/${id}`),
 };

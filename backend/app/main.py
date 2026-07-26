@@ -1,6 +1,7 @@
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agent.api.routes import router as agent_router
 from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.invitations import router as invitations_router
@@ -61,6 +62,7 @@ app.include_router(invitations_router, prefix="/api/v1")
 app.include_router(keys_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(audit_router, prefix="/api/v1")
+app.include_router(agent_router, prefix="/api/v1")
 
 
 @app.get("/health")

@@ -1,9 +1,8 @@
-"""Role definitions for sub-system A.
+"""Role enum and RoleConfig — depends on prompts but not the other way around.
 
-Each role has a system prompt, default model, allowed tools, and step limit.
-The runtime picks the right role based on the task type.
+The Role enum lives here; the per-role prompt text is in `app.agent.prompts`.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -33,96 +32,74 @@ class RoleConfig:
 _DEFAULT_TOOLS_READ_ONLY: tuple[str, ...] = (
     "read_file",
     "list_dir",
+    "find_files",
     "grep_search",
     "ast_grep",
     "git_status",
     "git_diff",
+    "list_todos",
+    "update_todo",
+    "ask_user",
+    "finish",
 )
 
 _DEFAULT_TOOLS_FULL: tuple[str, ...] = (
     *_DEFAULT_TOOLS_READ_ONLY,
     "write_file",
     "edit_file",
+    "apply_patch",
     "run_command",
+    "run_tests",
+    "run_subagent",
+    "http_request",
 )
 
-_BASE_PROMPT = (
-    "You are a focused specialist. Use the tools available to you. "
-    "When the task is complete, call the `finish` tool with a brief summary."
-)
+
+def _build_role_configs() -> dict[Role, RoleConfig]:
+    """Lazy builder — imports prompts at call time to avoid circular import."""
+    from app.agent.prompts import get_prompt
+
+    def _cfg(role: Role, model: str, tools: tuple[str, ...], max_steps: int) -> RoleConfig:
+        return RoleConfig(
+            role=role,
+            system_prompt=get_prompt(role),
+            default_model=model,
+            tool_names=tools,
+            max_steps=max_steps,
+        )
+
+    return {
+        Role.MANAGER: _cfg(
+            Role.MANAGER, "gpt-4o",
+            (*_DEFAULT_TOOLS_READ_ONLY, "run_subagent"),
+            max_steps=40,
+        ),
+        Role.ANALYST: _cfg(Role.ANALYST, "gpt-4o", _DEFAULT_TOOLS_READ_ONLY, max_steps=25),
+        Role.DEVELOPER_FE: _cfg(
+            Role.DEVELOPER_FE, "claude-sonnet-4-5", _DEFAULT_TOOLS_FULL, max_steps=60,
+        ),
+        Role.DEVELOPER_BE: _cfg(
+            Role.DEVELOPER_BE, "claude-sonnet-4-5", _DEFAULT_TOOLS_FULL, max_steps=60,
+        ),
+        Role.QA: _cfg(
+            Role.QA, "gpt-4o",
+            (*_DEFAULT_TOOLS_READ_ONLY, "run_command", "run_tests"),
+            max_steps=30,
+        ),
+        Role.PM: _cfg(
+            Role.PM, "gpt-4o-mini",
+            ("read_file", "ask_user", "list_todos", "update_todo", "finish"),
+            max_steps=15,
+        ),
+        Role.SUPPORT: _cfg(
+            Role.SUPPORT, "gpt-4o-mini",
+            (*_DEFAULT_TOOLS_READ_ONLY, "run_command"),
+            max_steps=25,
+        ),
+    }
 
 
-def _role_config(
-    role: Role,
-    description: str,
-    model: str,
-    tools: tuple[str, ...],
-    max_steps: int,
-) -> RoleConfig:
-    return RoleConfig(
-        role=role,
-        system_prompt=f"{_BASE_PROMPT}\n\nRole: {role.value}\n{description}",
-        default_model=model,
-        tool_names=tools,
-        max_steps=max_steps,
-    )
-
-
-ROLE_CONFIGS: dict[Role, RoleConfig] = {
-    Role.MANAGER: _role_config(
-        Role.MANAGER,
-        "Orchestrate work between specialists. Route tasks, manage git branches, "
-        "open PRs. Do NOT modify code directly — delegate to DEV roles.",
-        "gpt-4o",
-        (*_DEFAULT_TOOLS_READ_ONLY, "run_subagent", "git_status", "git_diff"),
-        max_steps=40,
-    ),
-    Role.ANALYST: _role_config(
-        Role.ANALYST,
-        "Analyze projects, generate plans, identify files. Read-only — never write or edit code.",
-        "gpt-4o",
-        _DEFAULT_TOOLS_READ_ONLY,
-        max_steps=25,
-    ),
-    Role.DEVELOPER_FE: _role_config(
-        Role.DEVELOPER_FE,
-        "Frontend specialist. React, Next.js, CSS, UI. Use the edit_file tool "
-        "for precise edits and write_file for new files.",
-        "claude-sonnet-4-5",
-        _DEFAULT_TOOLS_FULL,
-        max_steps=60,
-    ),
-    Role.DEVELOPER_BE: _role_config(
-        Role.DEVELOPER_BE,
-        "Backend specialist. Python, FastAPI, SQLAlchemy, Go, Rust. Run tests "
-        "with pytest via run_command.",
-        "claude-sonnet-4-5",
-        _DEFAULT_TOOLS_FULL,
-        max_steps=60,
-    ),
-    Role.QA: _role_config(
-        Role.QA,
-        "Quality assurance. Run build, lint, and tests. Verify changes work. "
-        "Do not edit code — flag issues instead.",
-        "gpt-4o",
-        (*_DEFAULT_TOOLS_READ_ONLY, "run_command"),
-        max_steps=30,
-    ),
-    Role.PM: _role_config(
-        Role.PM,
-        "Product manager. Refine specs, write stories, prioritize. No code.",
-        "gpt-4o-mini",
-        (),
-        max_steps=15,
-    ),
-    Role.SUPPORT: _role_config(
-        Role.SUPPORT,
-        "Support / investigation. Read logs, run diagnostics, read-only commands.",
-        "gpt-4o-mini",
-        (*_DEFAULT_TOOLS_READ_ONLY, "run_command"),
-        max_steps=25,
-    ),
-}
+ROLE_CONFIGS: dict[Role, RoleConfig] = _build_role_configs()
 
 
 def get_role_config(role: Role) -> RoleConfig:

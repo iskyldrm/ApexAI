@@ -1,7 +1,8 @@
 """Prometheus metrics for FastAPI.
 
-Exports Counter/Histogram for HTTP requests. Designed to be enabled only
-when the OTEL_PROM_ENABLED flag is set so test runs aren't slow.
+Exports Counter/Histogram for HTTP requests AND agent-specific events.
+Designed to be enabled only when the ``metrics_enabled`` flag is set so
+test runs aren't slow.
 """
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
@@ -20,7 +21,36 @@ HTTP_LATENCY = Histogram(
     buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
 )
 
+# ----- Agent metrics (A sub-system) -----
+
+AGENT_RUNS = Counter(
+    "agent_runs_total",
+    "Total agent runs by role and finish_reason",
+    ["role", "finish_reason", "model"],
+)
+
+AGENT_RUN_DURATION = Histogram(
+    "agent_run_duration_seconds",
+    "Agent run wall-clock duration",
+    ["role"],
+    buckets=(0.5, 1, 2, 5, 10, 30, 60, 120, 300),
+)
+
+AGENT_TOKENS = Counter(
+    "agent_tokens_total",
+    "Total tokens consumed by agent runs",
+    ["role", "model", "direction"],  # direction: input | output
+)
+
+AGENT_STEPS = Histogram(
+    "agent_run_steps",
+    "Number of LLM steps per agent run",
+    ["role"],
+    buckets=(1, 2, 5, 10, 20, 40, 80, 160),
+)
+
 
 def metrics_response() -> tuple[bytes, str]:
     """Render the Prometheus exposition format."""
     return generate_latest(), CONTENT_TYPE_LATEST
+

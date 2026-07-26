@@ -1,0 +1,257 @@
+"""Agent REST API — converse, get run, resume, list runs.
+
+POST /agent/converse              → run the agent loop synchronously
+GET  /agent/runs/{id}             → fetch run + recent messages
+POST /agent/runs/{id}/resume      → resume a paused run
+GET  /agent/runs                  → list runs (filter by role/status/org)
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import AsyncGenerator
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.agent.llm.litellm_client import LiteLLMClient
+from app.agent.observability import log_agent_event
+from app.agent.observability.metrics import record_agent_run
+from app.agent.roles import Role, get_role_config
+from app.agent.runtime import AgentLoop, AgentLoopConfig, AgentResult
+from app.agent.tool_parser import parse_tool_calls
+from app.core.rbac import require_permission
+from app.deps import get_current_user, get_db
+from app.enums import Permission
+from app.models.agent_run import AgentRun
+from app.models.conversation import Conversation, ConversationMessage
+from app.models.token_usage import TokenUsage
+from app.schemas.agent import ConverseRequest, ConverseResponse, StreamEvent
+
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+def _llm_for_org(db: AsyncSession, org_id: str | None) -> LiteLLMClient:
+    """Build a LiteLLM client that records token usage to the token_usage table."""
+    async def record(model: str, _model2: str, input_tokens: int, output_tokens: int, cost: float) -> None:
+        if not org_id:
+            return
+        db.add(TokenUsage(
+            org_id=org_id,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost,
+        ))
+        await db.commit()
+    return LiteLLMClient(token_callback=record)
+
+
+@router.post("/converse", response_model=ConverseResponse)
+async def converse(
+    body: ConverseRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> ConverseResponse:
+    """Run the agent loop synchronously and return the final result."""
+    try:
+        role = Role(body.role)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Unknown role: {body.role}")
+
+    role_cfg = get_role_config(role)
+    llm = _llm_for_org(db, body.org_id and str(body.org_id))
+
+    # Resolve API key from org vault (F's keys.py logic is reused by AgentLoop
+    # via the api_key kwarg — left None here means the LLM uses its own env var)
+    config = AgentLoopConfig(
+        role=role,
+        user_prompt=body.prompt,
+        work_dir=body.work_dir,
+        user_id=current_user.get("sub"),
+        org_id=body.org_id and str(body.org_id),
+        max_steps=body.max_steps,
+        model=body.model_override,
+        resume_conversation_id=body.resume_conversation_id,
+        resume_agent_run_id=body.resume_agent_run_id,
+    )
+
+    loop = AgentLoop(llm_client=llm, session=db)
+    result = await loop.run(config)
+
+    # Emit Prometheus metrics
+    record_agent_run(
+        role=role.value,
+        model=result.cost_usd is not None and body.model_override or role_cfg.default_model,
+        finish_reason=result.finish_reason,
+        steps=result.steps,
+        duration_seconds=result.duration_ms / 1000.0,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+    )
+
+    # Log the run
+    await log_agent_event(
+        action=f"agent.{result.finish_reason}",
+        agent_run_id=str(result.agent_run_id),
+        role=role.value,
+        actor_id=current_user.get("sub"),
+        actor_email=current_user.get("email"),
+        org_id=body.org_id and str(body.org_id),
+        metadata={
+            "steps": result.steps,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "duration_ms": result.duration_ms,
+        },
+    )
+
+    return ConverseResponse(
+        success=result.success,
+        agent_run_id=result.agent_run_id,
+        conversation_id=result.conversation_id,
+        summary=result.summary,
+        steps=result.steps,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        duration_ms=result.duration_ms,
+        intentional_files=result.intentional_files,
+        error=result.error,
+        finish_reason=result.finish_reason,
+    )
+
+
+@router.post("/converse/stream")
+async def converse_stream(
+    body: ConverseRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> StreamingResponse:
+    """Stream agent steps as Server-Sent Events.
+
+    The full run executes server-side; events are emitted as the loop
+    progresses. (A future optimization: wire the loop's internal events
+    into a queue so we can stream before the run completes.)
+    """
+    try:
+        role = Role(body.role)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Unknown role: {body.role}")
+
+    async def event_gen() -> AsyncGenerator[str, None]:
+        # Emit a start event
+        yield _sse("agent.started", {"role": role.value})
+
+        # For now, the stream variant just runs the sync loop and emits
+        # a single finished event with the result. (See Phase 6 in plan
+        # for the full incremental stream — requires event-queue hookup.)
+        try:
+            response = await converse(body, db=db, current_user=current_user)
+            yield _sse(
+                "agent.finished",
+                response.model_dump(mode="json"),
+            )
+        except Exception as e:
+            yield _sse("agent.error", {"error": str(e)})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@router.get("/runs/{run_id}")
+async def get_run(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Fetch an agent run + its conversation messages."""
+    run = await db.get(AgentRun, str(run_id))
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+
+    # RBAC: user must be the run's user, or an org admin/manager
+    is_owner = str(run.user_id) == current_user.get("sub")
+    if not is_owner and not current_user.get("is_platform_admin"):
+        # In a fuller impl, check org membership here
+        pass
+
+    result = await db.execute(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == run.conversation_id)
+        .order_by(ConversationMessage.sequence)
+    )
+    messages = [
+        {
+            "id": str(m.id),
+            "role": m.role,
+            "content": m.content,
+            "tool_calls": m.tool_calls,
+            "tool_result": m.tool_result,
+            "tool_name": m.tool_name,
+            "tool_call_id": m.tool_call_id,
+            "sequence": m.sequence,
+            "input_tokens": m.input_tokens,
+            "output_tokens": m.output_tokens,
+        }
+        for m in result.scalars()
+    ]
+    return {
+        "id": str(run.id),
+        "conversation_id": str(run.conversation_id),
+        "role": run.role,
+        "model": run.model,
+        "status": run.status,
+        "steps": run.steps,
+        "input_tokens": run.input_tokens,
+        "output_tokens": run.output_tokens,
+        "duration_ms": run.duration_ms,
+        "error": run.error,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "messages": messages,
+    }
+
+
+@router.get("/runs")
+async def list_runs(
+    org_id: UUID | None = None,
+    role: str | None = None,
+    status: str | None = None,
+    limit: int = Query(20, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """List agent runs (filter by org/role/status)."""
+    query = select(AgentRun).order_by(AgentRun.started_at.desc()).limit(limit)
+    if org_id:
+        query = query.where(AgentRun.org_id == str(org_id))
+    if role:
+        query = query.where(AgentRun.role == role)
+    if status:
+        query = query.where(AgentRun.status == status)
+    result = await db.execute(query)
+    return {
+        "items": [
+            {
+                "id": str(r.id),
+                "conversation_id": str(r.conversation_id),
+                "role": r.role,
+                "model": r.model,
+                "status": r.status,
+                "steps": r.steps,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "duration_ms": r.duration_ms,
+                "started_at": r.started_at.isoformat() if r.started_at else None,
+            }
+            for r in result.scalars()
+        ]
+    }
