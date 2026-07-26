@@ -55,6 +55,31 @@ services:
       timeout: 5s
       retries: 10
 
+  # One-shot seeder: creates the platform admin user, runs Alembic migrations.
+  # Exit 0 once done. Compose waits for it before bringing up the API.
+  seeder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: apexai_seeder
+    profiles: ["seed"]   # not started by `up -d` — use `up seeder` to run
+    command: >
+      sh -c "
+        uv run alembic upgrade head &&
+        uv run python -m app.db_seeder
+      "
+    environment:
+      - DATABASE_URL=postgresql+psycopg://apexai:apexai_dev@postgres:5432/apexai
+      - VAULT_URL=http://vault:8200
+      - VAULT_TOKEN=apexai_dev_token
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET=dev-secret-change-me-in-production-please-use-32-bytes-min
+    depends_on:
+      postgres:
+        condition: service_healthy
+      vault:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   redis_data:

@@ -1,14 +1,18 @@
-"""Agent REST API — converse, get run, resume, list runs.
+"""Agent REST API — converse, get run, cancel, list, admin.
 
-POST /agent/converse              → run the agent loop synchronously
-GET  /agent/runs/{id}             → fetch run + recent messages
-POST /agent/runs/{id}/resume      → resume a paused run
-GET  /agent/runs                  → list runs (filter by role/status/org)
+POST /agent/converse                  → run the agent loop synchronously
+POST /agent/converse/stream           → SSE event stream
+GET  /agent/runs/{id}                 → fetch run + recent messages
+POST /agent/runs/{id}/cancel          → cancel a running run
+GET  /agent/runs                      → list runs (filter by org/role/status)
+POST /agent/admin/cleanup             → platform admin: mark stuck runs
+GET  /agent/admin/stats               → platform admin: aggregated stats
 """
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from typing import AsyncGenerator
 from uuid import UUID
 
@@ -17,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.cleanup import mark_stuck_runs
 from app.agent.llm.litellm_client import LiteLLMClient
 from app.agent.observability import log_agent_event
 from app.agent.observability.metrics import record_agent_run
@@ -30,6 +35,7 @@ from app.models.agent_run import AgentRun
 from app.models.conversation import Conversation, ConversationMessage
 from app.models.token_usage import TokenUsage
 from app.schemas.agent import ConverseRequest, ConverseResponse, StreamEvent
+from sqlalchemy import func, select
 
 
 logger = logging.getLogger(__name__)
@@ -254,4 +260,82 @@ async def list_runs(
             }
             for r in result.scalars()
         ]
+    }
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Cancel a running agent run. Marks it as 'cancelled'."""
+    run = await db.get(AgentRun, str(run_id))
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    if run.status not in ("running",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run is {run.status}, cannot cancel",
+        )
+    run.status = "cancelled"
+    run.error = "Cancelled by user"
+    run.finished_at = datetime.utcnow()
+    await db.commit()
+    await log_agent_event(
+        action="agent.cancelled",
+        agent_run_id=str(run.id),
+        role=run.role,
+        actor_id=current_user.get("sub"),
+        actor_email=current_user.get("email"),
+        org_id=run.org_id,
+    )
+    return {"status": "cancelled", "agent_run_id": str(run.id)}
+
+
+@router.post("/admin/cleanup")
+async def admin_cleanup(
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Platform-admin endpoint: mark all stuck runs (>1h running) as stuck."""
+    if not current_user.get("is_platform_admin"):
+        raise HTTPException(status_code=403, detail="Platform admin required")
+    count = await mark_stuck_runs(db)
+    return {"marked_stuck": count}
+
+
+@router.get("/admin/stats")
+async def admin_stats(
+    org_id: UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Platform-admin endpoint: aggregated agent stats (counts, tokens, cost)."""
+    if not current_user.get("is_platform_admin"):
+        raise HTTPException(status_code=403, detail="Platform admin required")
+
+    base = select(
+        func.count(AgentRun.id).label("total_runs"),
+        func.coalesce(func.sum(AgentRun.input_tokens), 0).label("total_input"),
+        func.coalesce(func.sum(AgentRun.output_tokens), 0).label("total_output"),
+        func.coalesce(func.sum(AgentRun.cost_usd), 0.0).label("total_cost"),
+    )
+    if org_id:
+        base = base.where(AgentRun.org_id == str(org_id))
+    totals = (await db.execute(base)).one()
+
+    by_status_q = select(
+        AgentRun.status, func.count(AgentRun.id)
+    ).group_by(AgentRun.status)
+    if org_id:
+        by_status_q = by_status_q.where(AgentRun.org_id == str(org_id))
+    by_status = {s: c for s, c in (await db.execute(by_status_q)).all()}
+
+    return {
+        "total_runs": totals.total_runs,
+        "total_input_tokens": int(totals.total_input),
+        "total_output_tokens": int(totals.total_output),
+        "total_cost_usd": float(totals.total_cost),
+        "by_status": by_status,
     }
