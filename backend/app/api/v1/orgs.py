@@ -42,6 +42,14 @@ router = APIRouter(prefix="/orgs", tags=["orgs"])
 async def _require_org_member(
     db: AsyncSession, current_user: dict, org_id: UUID
 ) -> OrgMembership:
+    if current_user.get("is_platform_admin"):
+        # Platform admin bypasses membership check but still returns a stub
+        return OrgMembership(
+            org_id=str(org_id),
+            user_id=current_user["sub"],
+            role=Role.ADMIN.value,
+            status="active",
+        )
     membership = (
         await db.execute(
             select(OrgMembership).where(

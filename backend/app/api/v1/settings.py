@@ -73,23 +73,20 @@ async def set_setting(
     if body.scope == SettingScope.ORG:
         if not body.scope_id:
             raise HTTPException(status_code=400, detail="scope_id required for org scope")
-        membership = (
-            await db.execute(
-                select(OrgMembership).where(
-                    OrgMembership.org_id == body.scope_id,
-                    OrgMembership.user_id == current_user["sub"],
-                    OrgMembership.status == "active",
+        if current_user.get("is_platform_admin"):
+            pass  # platform admin bypass
+        else:
+            membership = (
+                await db.execute(
+                    select(OrgMembership).where(
+                        OrgMembership.org_id == body.scope_id,
+                        OrgMembership.user_id == current_user["sub"],
+                        OrgMembership.status == "active",
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if (
-            not membership
-            or not (
-                membership.role == "admin"
-                or current_user.get("is_platform_admin")
-            )
-        ):
-            raise HTTPException(status_code=403, detail="Org admin required")
+            ).scalar_one_or_none()
+            if not membership or membership.role != "admin":
+                raise HTTPException(status_code=403, detail="Org admin required")
 
     if body.scope == SettingScope.TEAM:
         if not body.scope_id:

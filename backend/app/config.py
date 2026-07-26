@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     password_reset_ttl_minutes: int = 30
     email_verification_ttl_hours: int = 24
 
+    # Observability
+    metrics_enabled: bool = False  # Toggle Prometheus collection per-env
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,4 +1,4 @@
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.audit import router as audit_router
@@ -8,7 +8,9 @@ from app.api.v1.keys import router as keys_router
 from app.api.v1.orgs import router as orgs_router
 from app.api.v1.settings import router as settings_router
 from app.config import get_settings
+from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS, metrics_response
 from app.deps import get_current_user
+import time
 
 settings = get_settings()
 
@@ -20,6 +22,30 @@ app = FastAPI(
     docs_url="/api/v1/docs",
     redoc_url="/api/v1/redoc",
 )
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """Record HTTP request count + latency for Prometheus."""
+    if not settings.metrics_enabled:
+        return await call_next(request)
+    start = time.perf_counter()
+    response = await call_next(request)
+    elapsed = time.perf_counter() - start
+    # route path is filled in by FastAPI on response.scope
+    path = request.scope.get("route").path if request.scope.get("route") else request.url.path
+    HTTP_LATENCY.labels(method=request.method, path=path).observe(elapsed)
+    HTTP_REQUESTS.labels(
+        method=request.method, path=path, status=response.status_code
+    ).inc()
+    return response
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    body, content_type = metrics_response()
+    return Response(content=body, media_type=content_type)
+
 
 app.add_middleware(
     CORSMiddleware,

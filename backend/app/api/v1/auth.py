@@ -43,7 +43,7 @@ async def _build_orgs(db: AsyncSession, user_id: str) -> list[dict]:
         select(OrgMembership).where(OrgMembership.user_id == user_id)
     )
     return [
-        {"org_id": m.org_id, "role": m.role, "teams": []}
+        {"org_id": str(m.org_id), "role": m.role, "teams": []}
         for m in result.scalars()
         if m.status == "active"
     ]
