@@ -1,18 +1,21 @@
-"""Agent REST API — converse, get run, cancel, list, admin.
+"""Agent REST API — converse, get run, cancel, list, admin, resume, export.
 
 POST /agent/converse                  → run the agent loop synchronously
 POST /agent/converse/stream           → SSE event stream
 GET  /agent/runs/{id}                 → fetch run + recent messages
 POST /agent/runs/{id}/cancel          → cancel a running run
+POST /agent/runs/{id}/resume         → resume a paused run (with approval)
+GET  /agent/runs/{id}/export          → full conversation export (Task 43)
 GET  /agent/runs                      → list runs (filter by org/role/status)
 POST /agent/admin/cleanup             → platform admin: mark stuck runs
 GET  /agent/admin/stats               → platform admin: aggregated stats
+GET  /agent/usage/summary             → org usage summary (Task 61)
 """
 from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import AsyncGenerator
 from uuid import UUID
 
@@ -23,6 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.cleanup import mark_stuck_runs
 from app.agent.llm.litellm_client import LiteLLMClient
+from app.agent.memory import Message, export_conversation
+from app.agent.model_resolver import resolve_default_model
 from app.agent.observability import log_agent_event
 from app.agent.observability.metrics import record_agent_run
 from app.agent.roles import Role, get_role_config
@@ -73,6 +78,15 @@ async def converse(
     role_cfg = get_role_config(role)
     llm = _llm_for_org(db, body.org_id and str(body.org_id))
 
+    # Task 60: resolve model via settings table (user > org > platform > role default)
+    model = await resolve_default_model(
+        db,
+        role=role,
+        org_id=body.org_id and str(body.org_id),
+        user_id=current_user.get("sub"),
+        request_override=body.model_override,
+    )
+
     # Resolve API key from org vault (F's keys.py logic is reused by AgentLoop
     # via the api_key kwarg — left None here means the LLM uses its own env var)
     config = AgentLoopConfig(
@@ -82,7 +96,7 @@ async def converse(
         user_id=current_user.get("sub"),
         org_id=body.org_id and str(body.org_id),
         max_steps=body.max_steps,
-        model=body.model_override,
+        model=model,
         resume_conversation_id=body.resume_conversation_id,
         resume_agent_run_id=body.resume_agent_run_id,
     )
@@ -226,6 +240,54 @@ async def get_run(
     }
 
 
+@router.get("/usage/summary")
+async def usage_summary(
+    org_id: UUID | None = None,
+    period: str = Query("7d", pattern="^(1d|7d|30d)$"),
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Token usage + cost summary over a recent period (Task 61).
+
+    Default 7 days. org_id required for non-platform-admin.
+    """
+    is_pa = current_user.get("is_platform_admin", False)
+    if not is_pa and not org_id:
+        raise HTTPException(status_code=400, detail="org_id required")
+
+    days = {"1d": 1, "7d": 7, "30d": 30}[period]
+    threshold = datetime.utcnow() - timedelta(days=days)
+
+    q = select(
+        func.count(TokenUsage.id).label("calls"),
+        func.coalesce(func.sum(TokenUsage.input_tokens), 0).label("input"),
+        func.coalesce(func.sum(TokenUsage.output_tokens), 0).label("output"),
+        func.coalesce(func.sum(TokenUsage.cost_usd), 0.0).label("cost"),
+    ).where(TokenUsage.created_at >= threshold)
+    if org_id:
+        q = q.where(TokenUsage.org_id == str(org_id))
+    totals = (await db.execute(q)).one()
+
+    by_model = select(
+        TokenUsage.model,
+        func.coalesce(func.sum(TokenUsage.input_tokens + TokenUsage.output_tokens), 0).label("tokens"),
+    ).where(TokenUsage.created_at >= threshold)
+    if org_id:
+        by_model = by_model.where(TokenUsage.org_id == str(org_id))
+    by_model = by_model.group_by(TokenUsage.model).order_by(func.sum(TokenUsage.input_tokens + TokenUsage.output_tokens).desc())
+    model_rows = (await db.execute(by_model)).all()
+
+    return {
+        "period": period,
+        "calls": totals.calls,
+        "input_tokens": int(totals.input),
+        "output_tokens": int(totals.output),
+        "total_tokens": int(totals.input) + int(totals.output),
+        "cost_usd": float(totals.cost),
+        "by_model": [{"model": m, "tokens": int(t)} for m, t in model_rows],
+    }
+
+
 @router.get("/runs")
 async def list_runs(
     org_id: UUID | None = None,
@@ -260,6 +322,109 @@ async def list_runs(
             }
             for r in result.scalars()
         ]
+    }
+
+
+@router.get("/runs/{run_id}/export")
+async def export_run(
+    run_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Export the full conversation as JSON (Task 43)."""
+    run = await db.get(AgentRun, str(run_id))
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    result = await db.execute(
+        select(ConversationMessage)
+        .where(ConversationMessage.conversation_id == run.conversation_id)
+        .order_by(ConversationMessage.sequence)
+    )
+    msgs = [
+        Message(
+            role=m.role,
+            content=m.content,
+            tool_calls=m.tool_calls,
+            tool_call_id=m.tool_call_id,
+            tool_name=m.tool_name,
+            id=m.id,
+            parent_id=m.parent_message_id,
+            input_tokens=m.input_tokens,
+            output_tokens=m.output_tokens,
+        )
+        for m in result.scalars()
+    ]
+    exported = export_conversation(msgs)
+    exported["agent_run_id"] = str(run.id)
+    exported["role"] = run.role
+    exported["status"] = run.status
+    return exported
+
+
+@router.post("/runs/{run_id}/resume")
+async def resume_run(
+    run_id: UUID,
+    body: dict | None = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+) -> dict:
+    """Resume a paused or awaiting_approval run.
+
+    Body: { "approval_comment": "..." } for plan/migration approvals,
+    or empty {} to simply continue.
+    """
+    run = await db.get(AgentRun, str(run_id))
+    if not run:
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    if run.status not in ("awaiting_approval", "paused", "stuck"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Run is {run.status}, cannot resume",
+        )
+
+    # Append approval to conversation as a system message
+    conv_id = run.conversation_id
+    # Find the current max sequence
+    seq_result = await db.execute(
+        select(func.coalesce(func.max(ConversationMessage.sequence), 0)).where(
+            ConversationMessage.conversation_id == conv_id
+        )
+    )
+    next_seq = (seq_result.scalar() or 0) + 1
+    msg = ConversationMessage(
+        conversation_id=conv_id,
+        role="system",
+        content=f"[RESUMED by user] {(body or {}).get('approval_comment', '')}",
+        sequence=next_seq,
+    )
+    db.add(msg)
+    run.status = "running"
+    run.error = None
+    await db.commit()
+
+    # Re-run with resume_conversation_id
+    role = Role(run.role)
+    config = AgentLoopConfig(
+        role=role,
+        user_prompt=run.role,  # original prompt not stored; re-execute same role
+        work_dir="/tmp",
+        user_id=current_user.get("sub"),
+        org_id=run.org_id,
+        resume_conversation_id=run.conversation_id,
+        resume_agent_run_id=run.id,
+    )
+
+    # Re-execute the loop
+    llm = _llm_for_org(db, run.org_id)
+    loop = AgentLoop(llm_client=llm, session=db)
+    result = await loop.run(config)
+
+    return {
+        "agent_run_id": str(result.agent_run_id),
+        "success": result.success,
+        "finish_reason": result.finish_reason,
+        "summary": result.summary,
+        "steps": result.steps,
     }
 
 

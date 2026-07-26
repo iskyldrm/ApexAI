@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from app.agent.gates import evaluate_migration_gate
 from app.agent.llm.litellm_client import LLMResponse, LiteLLMClient
 from app.agent.memory import ConversationStore, Message, extractive_summary, maybe_summarize, trim
 from app.agent.roles import Role, get_role_config
@@ -214,6 +215,19 @@ class AgentLoop:
                     repetition.record(tc.name, tc.arguments, self.tools[tc.name].is_mutating)
                     if result.metadata.get("intentional") and result.metadata.get("path"):
                         all_intentional.append(result.metadata["path"])
+
+                    # Task 30: migration approval gate
+                    if tc.name == "run_command" and result.ok:
+                        gate = evaluate_migration_gate(tc.arguments.get("command", ""))
+                        if gate.trip:
+                            messages.append(Message(role="system", content=gate.guidance))
+                            await self._persist(store, messages[-1:], sequence=len(messages))
+                            error_msg = gate.reason
+                            finish_reason = "awaiting_approval"
+                            # Mark the run as awaiting approval so resume works
+                            agent_run.status = "awaiting_approval"
+                            await self.session.commit()
+                            break
 
                 if step_should_exit:
                     break
