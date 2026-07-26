@@ -1,3 +1,4 @@
+from app.models.agent_run import AgentRun
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
 from app.models.auth_token import (
@@ -6,6 +7,7 @@ from app.models.auth_token import (
     RefreshToken,
 )
 from app.models.base import BaseModel
+from app.models.conversation import Conversation, ConversationMessage
 from app.models.integration import IntegrationCredential
 from app.models.invitation import Invitation
 from app.models.membership import OrgMembership, TeamMembership
@@ -17,9 +19,12 @@ from app.models.token_usage import TokenUsage
 from app.models.user import User
 
 __all__ = [
+    "AgentRun",
     "ApiKey",
     "AuditLog",
     "BaseModel",
+    "Conversation",
+    "ConversationMessage",
     "EmailVerificationToken",
     "IntegrationCredential",
     "Invitation",
