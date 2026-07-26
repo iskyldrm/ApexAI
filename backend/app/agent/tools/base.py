@@ -18,6 +18,8 @@ class ToolContext:
     org_id: str | None
     work_dir: str
     allowed_paths: tuple[str, ...] = ()
+    db_session: Any | None = None  # AsyncSession for tools that touch the DB
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

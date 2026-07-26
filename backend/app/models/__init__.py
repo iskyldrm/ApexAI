@@ -1,4 +1,5 @@
 from app.models.agent_run import AgentRun
+from app.models.agent_todo import AgentTodo
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog
 from app.models.auth_token import (
@@ -20,6 +21,7 @@ from app.models.user import User
 
 __all__ = [
     "AgentRun",
+    "AgentTodo",
     "ApiKey",
     "AuditLog",
     "BaseModel",
