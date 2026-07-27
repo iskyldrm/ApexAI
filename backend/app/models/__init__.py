@@ -14,6 +14,7 @@ from app.models.invitation import Invitation
 from app.models.membership import OrgMembership, TeamMembership
 from app.models.org import Org
 from app.models.platform_admin import PlatformAdmin
+from app.models.process import Process, ProcessDLQ, ProcessEvent, ProcessStep
 from app.models.setting import Setting
 from app.models.team import Team
 from app.models.token_usage import TokenUsage
@@ -34,6 +35,10 @@ __all__ = [
     "OrgMembership",
     "PasswordResetToken",
     "PlatformAdmin",
+    "Process",
+    "ProcessDLQ",
+    "ProcessEvent",
+    "ProcessStep",
     "RefreshToken",
     "Setting",
     "Team",
