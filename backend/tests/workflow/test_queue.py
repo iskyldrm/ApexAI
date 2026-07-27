@@ -114,9 +114,22 @@ async def test_claim_ready_steps_claims_roots_first():
 @pytest.mark.asyncio
 async def test_claim_skips_steps_with_future_retry_time():
     process_id, _ = await _make_process()
+    # Mark b/c completed first so they don't show up as claimable
+    async with async_session_maker() as session:
+        for name in ("b", "c"):
+            result = await session.execute(
+                select(ProcessStep).where(
+                    ProcessStep.process_id == process_id,
+                    ProcessStep.step_name == name,
+                )
+            )
+            step = result.scalar_one()
+            step.status = "completed"
+        await session.commit()
+
+    # Set 'a' to retrying with future retry time
     future = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(tzinfo=None)
     async with async_session_maker() as session:
-        # Push a's next_retry_at to the future and mark as retrying
         result = await session.execute(
             select(ProcessStep).where(
                 ProcessStep.process_id == process_id,
@@ -130,7 +143,10 @@ async def test_claim_skips_steps_with_future_retry_time():
 
     async with async_session_maker() as session:
         claimed = await claim_ready_steps(session, limit=10)
-        names = {s.step_name for s in claimed}
+        # Filter to only steps in our test process (other tests may leave
+        # claimable steps around)
+        ours = [s for s in claimed if str(s.process_id) == str(process_id)]
+        names = {s.step_name for s in ours}
         assert "a" not in names
 
 

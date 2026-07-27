@@ -222,6 +222,10 @@ class ProcessDLQ(BaseModel, table=True):
         default=0,
         sa_column=Column(Integer, nullable=False, server_default="0"),
     )
+    failed_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime, nullable=True),
+    )
     resolved_at: datetime | None = Field(
         default=None,
         sa_column=Column(DateTime, nullable=True),

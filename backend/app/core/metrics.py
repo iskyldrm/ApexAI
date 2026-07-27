@@ -49,6 +49,27 @@ AGENT_STEPS = Histogram(
     buckets=(1, 2, 5, 10, 20, 40, 80, 160),
 )
 
+# ----- Process / workflow metrics (B sub-system) -----
+
+PROCESSES_TOTAL = Counter(
+    "processes_total",
+    "Total workflows by status",
+    ["status"],
+)
+
+PROCESS_STEP_DURATION = Histogram(
+    "process_step_duration_seconds",
+    "Process step wall-clock duration",
+    ["role", "status"],
+    buckets=(0.5, 1, 5, 10, 30, 60, 120, 300, 600),
+)
+
+PROCESS_DLQ_OPEN = Counter(
+    "process_dlq_open",
+    "Cumulative count of steps that hit DLQ",
+    ["role"],
+)
+
 
 def metrics_response() -> tuple[bytes, str]:
     """Render the Prometheus exposition format."""

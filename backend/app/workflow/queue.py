@@ -81,7 +81,12 @@ async def claim_ready_steps(
             continue
         if step.status not in ("pending", "retrying"):
             continue
-        if step.next_retry_at and step.next_retry_at > now:
+        # Normalize: DB returns naive datetimes; ensure we compare both as naive
+        retry_at = step.next_retry_at
+        if retry_at is not None and retry_at.tzinfo is not None:
+            retry_at = retry_at.replace(tzinfo=None)
+        if retry_at and retry_at > now:
+            logger.debug("SKIP step %s — retry_at=%s > now=%s", step_id, retry_at, now)
             continue
 
         # Mark as running + bump attempt

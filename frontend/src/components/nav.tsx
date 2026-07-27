@@ -2,7 +2,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { LogOut, Settings, Key, Users, FileText, Activity, Plus, Sparkles } from "lucide-react";
+import { LogOut, Settings, Key, Users, FileText, Activity, Plus, Sparkles, GitBranch } from "lucide-react";
 import { useAuth } from "@/lib/auth-context";
 import { orgs } from "@/lib/api-client";
 import type { Org } from "@/lib/types";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: Activity },
   { href: "/agent", label: "Agent", icon: Sparkles },
+  { href: "/processes", label: "Workflows", icon: GitBranch },
   { href: "/orgs", label: "Organizations", icon: Users },
   { href: "/keys", label: "AI Keys", icon: Key },
   { href: "/audit", label: "Audit Log", icon: FileText },

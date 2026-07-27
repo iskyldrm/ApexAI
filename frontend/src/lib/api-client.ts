@@ -6,6 +6,11 @@ import type {
   ConverseResponse,
 } from "@/lib/agent-types";
 import type {
+  DLQEntry,
+  ProcessEvent,
+  ProcessRecord,
+} from "@/lib/process-types";
+import type {
   ApiKey,
   AuditLogEntry,
   Integration,
@@ -144,4 +149,33 @@ export const agent = {
     );
   },
   getRun: (id: string) => apiFetch<AgentRunDetail>(`/agent/runs/${id}`),
+};
+
+export const processes = {
+  list: (status?: string) =>
+    apiFetch<ProcessRecord[]>(`/processes${status ? `?status=${status}` : ""}`),
+  get: (id: string) => apiFetch<ProcessRecord>(`/processes/${id}`),
+  create: (body: {
+    name: string;
+    steps: { name: string; role: string; prompt: string }[];
+    edges: { from: string; to: string }[];
+    inputs?: Record<string, unknown>;
+  }) =>
+    apiFetch<ProcessRecord>("/processes", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  start: (id: string) =>
+    apiFetch<ProcessRecord>(`/processes/${id}/start`, { method: "POST" }),
+  cancel: (id: string) =>
+    apiFetch<ProcessRecord>(`/processes/${id}/cancel`, { method: "POST" }),
+  resume: (id: string) =>
+    apiFetch<ProcessRecord>(`/processes/${id}/resume`, { method: "POST" }),
+  events: (id: string) => apiFetch<ProcessEvent[]>(`/processes/${id}/events`),
+  listDLQ: () => apiFetch<{ items: DLQEntry[] }>("/process-dlq"),
+  replayDLQ: (id: string) =>
+    apiFetch<{ replayed: boolean; step_id?: string }>(
+      `/process-dlq/${id}/replay`,
+      { method: "POST" },
+    ),
 };
