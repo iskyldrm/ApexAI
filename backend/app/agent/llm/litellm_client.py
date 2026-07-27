@@ -5,9 +5,15 @@ on a small, mockable surface (``completion() -> LLMResponse``).
 
 Token usage is recorded in a callback so each LLM call can be persisted
 to the ``token_usage`` table by the agent loop (F infrastructure).
+
+Provider resolution is env-driven:
+- ``OLLAMA_BASE_URL`` → Ollama (OpenAI-compatible) at /v1
+- ``ANTHROPIC_BASE_URL`` + ``ANTHROPIC_AUTH_TOKEN`` → Anthropic-compatible
+  (your MiniMax or any other gateway)
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
@@ -34,10 +40,63 @@ TokenCallback = Callable[[str, str, int, int, float], Awaitable[None]]
 
 
 class LiteLLMClient:
-    """Thin async wrapper around ``litellm.acompletion``."""
+    """Thin async wrapper around ``litellm.acompletion``.
+
+    Provider resolution (env-driven):
+    - If ``OLLAMA_BASE_URL`` is set: provider is ``ollama/`` (OpenAI-compatible)
+    - Else if ``ANTHROPIC_BASE_URL`` + ``ANTHROPIC_AUTH_TOKEN``: provider is
+      ``anthropic/`` (used for MiniMax or any Anthropic-compatible gateway)
+    - Otherwise: provider is whatever the model string says (e.g. ``gpt-4o``)
+    """
 
     def __init__(self, token_callback: TokenCallback | None = None) -> None:
         self._callback = token_callback
+        self._provider = self._detect_provider()
+
+    @staticmethod
+    def _detect_provider() -> str:
+        if os.environ.get("OLLAMA_BASE_URL"):
+            return "ollama"
+        if os.environ.get("ANTHROPIC_BASE_URL") and os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+            return "anthropic"
+        return ""
+
+    def _resolve_call_kwargs(
+        self,
+        model: str,
+        messages: list[dict],
+        tools: list[dict] | None,
+        api_key: str | None,
+        kwargs: dict,
+    ) -> tuple[str, str, dict]:
+        """Return (litellm_model, resolved_api_key, call_kwargs).
+
+        Strips any existing provider prefix on ``model`` and re-applies
+        the env-driven one. Passes ``api_base`` + ``api_key`` based on env.
+        """
+        bare = model.split("/", 1)[-1] if "/" in model else model
+        call_kwargs: dict = {"messages": messages}
+        if tools:
+            call_kwargs["tools"] = tools
+        if self._provider == "ollama":
+            litellm_model = f"ollama/{bare}"
+            base = os.environ["OLLAMA_BASE_URL"].rstrip("/")
+            # Ollama serves OpenAI-compatible at /v1
+            if not base.endswith("/v1"):
+                base = base + "/v1"
+            call_kwargs["api_base"] = base
+            call_kwargs["api_key"] = api_key or os.environ.get("OLLAMA_API_KEY", "ollama")
+        elif self._provider == "anthropic":
+            litellm_model = f"anthropic/{bare}"
+            call_kwargs["api_base"] = os.environ["ANTHROPIC_BASE_URL"]
+            call_kwargs["api_key"] = api_key or os.environ["ANTHROPIC_AUTH_TOKEN"]
+        else:
+            litellm_model = model
+            if api_key:
+                call_kwargs["api_key"] = api_key
+        call_kwargs.update(kwargs)
+        resolved_key = call_kwargs.get("api_key", "")
+        return litellm_model, resolved_key, call_kwargs
 
     async def completion(
         self,
@@ -49,19 +108,14 @@ class LiteLLMClient:
     ) -> LLMResponse:
         """Run a chat completion. Returns an LLMResponse.
 
-        If ``api_key`` is provided, it is passed as ``api_key`` to litellm.
+        Provider is auto-detected from env (Ollama > Anthropic-compat > raw).
+        Explicit ``api_key`` overrides the env-derived one.
         """
         import litellm
 
-        call_kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-        }
-        if tools:
-            call_kwargs["tools"] = tools
-        if api_key:
-            call_kwargs["api_key"] = api_key
-        call_kwargs.update(kwargs)
+        litellm_model, _resolved_key, call_kwargs = self._resolve_call_kwargs(
+            model, messages, tools, api_key, kwargs
+        )
 
         try:
             response = await litellm.acompletion(**call_kwargs)
@@ -71,7 +125,7 @@ class LiteLLMClient:
             return LLMResponse(
                 content=f"LLM error: {e}",
                 finish_reason="error",
-                model=model,
+                model=litellm_model,
             )
 
         # Extract the first choice

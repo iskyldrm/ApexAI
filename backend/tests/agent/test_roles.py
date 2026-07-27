@@ -16,7 +16,8 @@ def test_all_roles_have_config():
         cfg = ROLE_CONFIGS[role]
         assert cfg.role == role
         assert cfg.system_prompt
-        assert cfg.default_model
+        # default_model is resolved lazily from env; verify the resolver works
+        assert cfg.resolve_model()
         assert cfg.max_steps > 0
 
 

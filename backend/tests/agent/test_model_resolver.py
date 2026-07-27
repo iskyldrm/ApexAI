@@ -50,14 +50,19 @@ async def test_resolve_returns_request_override_first():
 
 
 @pytest.mark.asyncio
-async def test_resolve_falls_back_to_role_default_when_no_settings():
-    from app.agent.roles import Role
+async def test_resolve_falls_back_to_role_default_when_no_settings(monkeypatch):
+    from app.agent.roles import Role, resolve_default_model_name
+
+    # Force a known role default for the test (override env-driven selection)
+    monkeypatch.setenv("APEXAI_AGENT_MODEL", "claude-sonnet-4-5")
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    assert resolve_default_model_name() == "claude-sonnet-4-5"
 
     async with async_session_maker() as session:
         m = await resolve_default_model(
             session, role=Role.DEVELOPER_BE, org_id=None, user_id="user-1",
         )
-    # No settings exist for this user/org → fall back to role default
     assert m == "claude-sonnet-4-5"
 
 

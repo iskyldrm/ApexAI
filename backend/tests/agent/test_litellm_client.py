@@ -113,3 +113,87 @@ def test_estimate_cost_unknown_model_zero():
     from app.agent.llm.pricing import estimate_cost
 
     assert estimate_cost("future-unknown-model", 1_000_000, 1_000_000) == 0.0
+
+
+# -------------------- Provider resolution (Ollama + MiniMax) --------------------
+
+
+def test_default_model_resolves_to_ollama_when_set(monkeypatch):
+    """When OLLAMA_BASE_URL is set, default model is the Ollama model name."""
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    from app.agent.roles import resolve_default_model_name
+
+    assert resolve_default_model_name() == "llama3.2"
+
+
+def test_default_model_resolves_to_anthropic_when_ollama_absent(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimax.io/anthropic")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "MiniMax-M3")
+    from app.agent.roles import resolve_default_model_name
+
+    assert resolve_default_model_name() == "MiniMax-M3"
+
+
+def test_default_model_explicit_override_wins(monkeypatch):
+    monkeypatch.setenv("APEXAI_AGENT_MODEL", "gpt-4-turbo")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimax.io/anthropic")
+    from app.agent.roles import resolve_default_model_name
+
+    assert resolve_default_model_name() == "gpt-4-turbo"
+
+
+def test_default_model_fallback_when_no_env(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("APEXAI_AGENT_MODEL", raising=False)
+    from app.agent.roles import resolve_default_model_name
+
+    assert resolve_default_model_name() == "gpt-4o"
+
+
+def test_client_detects_ollama_provider(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    from app.agent.llm.litellm_client import LiteLLMClient
+
+    assert LiteLLMClient._detect_provider() == "ollama"
+
+
+def test_client_detects_anthropic_provider(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimax.io/anthropic")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-test")
+    from app.agent.llm.litellm_client import LiteLLMClient
+
+    assert LiteLLMClient._detect_provider() == "anthropic"
+
+
+def test_resolve_call_kwargs_uses_ollama_base(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    from app.agent.llm.litellm_client import LiteLLMClient
+
+    client = LiteLLMClient()
+    model, key, kw = client._resolve_call_kwargs(
+        "llama3.2", [{"role": "user", "content": "hi"}], None, None, {},
+    )
+    assert model == "ollama/llama3.2"
+    assert kw["api_base"] == "http://localhost:11434/v1"
+    assert kw["api_key"] == "ollama"
+
+
+def test_resolve_call_kwargs_uses_anthropic_base(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.minimax.io/anthropic")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-test")
+    from app.agent.llm.litellm_client import LiteLLMClient
+
+    client = LiteLLMClient()
+    model, key, kw = client._resolve_call_kwargs(
+        "MiniMax-M3", [{"role": "user", "content": "hi"}], None, None, {},
+    )
+    assert model == "anthropic/MiniMax-M3"
+    assert kw["api_base"] == "https://api.minimax.io/anthropic"
+    assert kw["api_key"] == "sk-test"

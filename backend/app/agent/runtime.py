@@ -117,7 +117,7 @@ class AgentLoop:
         start = time.perf_counter()
         role_cfg = get_role_config(config.role)
         max_steps = config.max_steps or role_cfg.max_steps
-        model = config.model or role_cfg.default_model
+        model = config.model or role_cfg.resolve_model()
 
         # Persist Conversation + AgentRun
         conversation, agent_run = await self._ensure_conversation(config, role_cfg, model)

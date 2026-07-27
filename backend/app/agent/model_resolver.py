@@ -33,7 +33,7 @@ async def resolve_default_model(
         return request_override
 
     role_cfg = get_role_config(role)
-    fallback = role_cfg.default_model
+    fallback = role_cfg.resolve_model()
 
     # Look up settings in order: user > org > platform
     candidates: list[tuple[str, str | None]] = [
@@ -65,7 +65,7 @@ async def resolve_default_model(
                 if scope in ("org", "platform"):
                     return model  # not enforced — still wins (more specific)
 
-    return fallback
+    return role_cfg.resolve_model()
 
 
 def _extract_model(value: Any) -> str | None:
