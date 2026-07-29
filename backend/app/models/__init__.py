@@ -16,6 +16,7 @@ from app.models.org import Org
 from app.models.platform_admin import PlatformAdmin
 from app.models.process import Process, ProcessDLQ, ProcessEvent, ProcessStep
 from app.models.setting import Setting
+from app.models.task import Notification, Task, TaskComment
 from app.models.team import Team
 from app.models.token_usage import TokenUsage
 from app.models.user import User
@@ -31,6 +32,7 @@ __all__ = [
     "EmailVerificationToken",
     "IntegrationCredential",
     "Invitation",
+    "Notification",
     "Org",
     "OrgMembership",
     "PasswordResetToken",
@@ -41,6 +43,8 @@ __all__ = [
     "ProcessStep",
     "RefreshToken",
     "Setting",
+    "Task",
+    "TaskComment",
     "Team",
     "TeamMembership",
     "TokenUsage",

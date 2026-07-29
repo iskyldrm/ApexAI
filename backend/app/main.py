@@ -9,6 +9,11 @@ from app.api.v1.keys import router as keys_router
 from app.api.v1.orgs import router as orgs_router
 from app.api.v1.settings import router as settings_router
 from app.workflow.api.routes import dlq_router, processes_router, router as process_router
+from app.workflow.api.task_routes import (
+    activity_router,
+    notifications_router,
+    tasks_router,
+)
 from app.config import get_settings
 from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS, metrics_response
 from app.deps import get_current_user
@@ -67,6 +72,9 @@ app.include_router(agent_router, prefix="/api/v1")
 app.include_router(process_router, prefix="/api/v1")  # DLQ router
 app.include_router(processes_router, prefix="/api/v1")  # /processes CRUD
 app.include_router(dlq_router, prefix="/api/v1")  # /process-dlq
+app.include_router(tasks_router, prefix="/api/v1")  # /tasks
+app.include_router(notifications_router, prefix="/api/v1")  # /notifications
+app.include_router(activity_router, prefix="/api/v1")  # /activity-feed
 
 
 @app.get("/health")

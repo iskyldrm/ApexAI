@@ -11,6 +11,12 @@ import type {
   ProcessRecord,
 } from "@/lib/process-types";
 import type {
+  ActivityFeedEntry,
+  Notification,
+  Task,
+  TaskComment,
+} from "@/lib/task-types";
+import type {
   ApiKey,
   AuditLogEntry,
   Integration,
@@ -177,5 +183,64 @@ export const processes = {
     apiFetch<{ replayed: boolean; step_id?: string }>(
       `/process-dlq/${id}/replay`,
       { method: "POST" },
+    ),
+};
+
+export const tasks = {
+  list: (params: { scope?: "mine" | "all"; status?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (params.scope) qs.set("scope", params.scope);
+    if (params.status) qs.set("status", params.status);
+    return apiFetch<Task[]>(`/tasks${qs.toString() ? `?${qs.toString()}` : ""}`);
+  },
+  get: (id: string) => apiFetch<Task>(`/tasks/${id}`),
+  create: (body: {
+    title: string;
+    description?: string;
+    assignee_id?: string;
+    priority?: "low" | "medium" | "high" | "urgent";
+  }) =>
+    apiFetch<Task>("/tasks", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  update: (id: string, body: Partial<Task>) =>
+    apiFetch<Task>(`/tasks/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  transition: (id: string, to: string) =>
+    apiFetch<Task>(`/tasks/${id}/transition`, {
+      method: "POST",
+      body: JSON.stringify({ to }),
+    }),
+  comments: (id: string) => apiFetch<TaskComment[]>(`/tasks/${id}/comments`),
+  addComment: (id: string, body: string) =>
+    apiFetch<TaskComment>(`/tasks/${id}/comments`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    }),
+};
+
+export const notifications = {
+  list: (unreadOnly = false) =>
+    apiFetch<Notification[]>(
+      `/notifications${unreadOnly ? "?unread_only=true" : ""}`,
+    ),
+  markAllRead: () =>
+    apiFetch<{ marked_read: number }>("/notifications/read-all", {
+      method: "POST",
+    }),
+  markRead: (id: string) =>
+    apiFetch<{ id: string; read_at: string }>(
+      `/notifications/${id}/read`,
+      { method: "POST" },
+    ),
+};
+
+export const activity = {
+  feed: (orgId?: string) =>
+    apiFetch<ActivityFeedEntry[]>(
+      `/activity-feed${orgId ? `?org_id=${orgId}` : ""}`,
     ),
 };
