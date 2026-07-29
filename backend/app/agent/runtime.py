@@ -29,6 +29,7 @@ from uuid import UUID, uuid4
 from app.agent.gates import evaluate_migration_gate
 from app.agent.llm.litellm_client import LLMResponse, LiteLLMClient
 from app.agent.memory import ConversationStore, Message, extractive_summary, maybe_summarize, trim
+from app.agent.observability import tracer
 from app.agent.roles import Role, get_role_config
 from app.agent.safety import (
     CircuitBreaker,
@@ -150,151 +151,181 @@ class AgentLoop:
         finish_reason: str | None = None
         error_msg: str | None = None
 
-        try:
-            while steps < max_steps:
-                steps += 1
-                await self._log_activity(agent_run.id, "agent.step_started", {"step": steps})
+        with tracer.start_as_current_span("agent.run") as run_span:
+            run_span.set_attribute("agent_run_id", str(agent_run.id))
+            run_span.set_attribute("role", config.role.value)
+            run_span.set_attribute("model", model)
+            run_span.set_attribute("org_id", str(config.org_id) if config.org_id else "")
 
-                # Trim if needed
-                messages = maybe_summarize(trim(messages, max_messages=30), threshold=50)
+            try:
+                while steps < max_steps:
+                    steps += 1
+                    await self._log_activity(agent_run.id, "agent.step_started", {"step": steps})
 
-                # Call LLM
-                llm_dicts = [m.to_llm_dict() for m in messages]
-                response: LLMResponse = await self.llm.completion(
-                    model=model,
-                    messages=llm_dicts,
-                    tools=tool_schemas,
-                    api_key=config.api_key,
-                )
-                if response.finish_reason == "error":
-                    finish_reason = "error"
-                    error_msg = response.content
-                    break
+                    # Trim if needed
+                    messages = maybe_summarize(trim(messages, max_messages=30), threshold=50)
 
-                budget.record(response.input_tokens, response.output_tokens)
-                await self._persist_assistant(store, messages, response, steps)
-
-                last_assistant_content = response.content
-
-                # Parse tool calls (native + text)
-                tool_calls = parse_tool_calls(response.content, response.tool_calls)
-                if not tool_calls:
-                    # LLM decided it's done without calling finish — treat as finish
-                    finish_reason = "finished"
-                    break
-
-                # Execute each tool
-                step_should_exit = False
-                for tc in tool_calls:
-                    if await self._is_finish_call(tc):
-                        finish_reason = "finished"
-                        messages.append(
-                            Message(role="tool", content="finish accepted", tool_call_id=tc.id, tool_name=tc.name)
+                    # Call LLM
+                    llm_dicts = [m.to_llm_dict() for m in messages]
+                    with tracer.start_as_current_span("llm.completion") as llm_span:
+                        llm_span.set_attribute("model", model)
+                        llm_span.set_attribute("step", steps)
+                        response: LLMResponse = await self.llm.completion(
+                            model=model,
+                            messages=llm_dicts,
+                            tools=tool_schemas,
+                            api_key=config.api_key,
                         )
-                        await self._persist(store, messages[-1:], sequence=len(messages))
-                        step_should_exit = True
+                        llm_span.set_attribute("input_tokens", response.input_tokens)
+                        llm_span.set_attribute("output_tokens", response.output_tokens)
+                        llm_span.set_attribute("cost_usd", response.cost_usd)
+                        llm_span.set_attribute("finish_reason", response.finish_reason)
+                    if response.finish_reason == "error":
+                        finish_reason = "error"
+                        error_msg = response.content
                         break
 
-                    result = await self._execute_tool(tc, config, available_tools, circuit, repetition, edit_tracker)
-                    messages.append(
-                        Message(
-                            role="tool",
-                            content=result.output if result.ok else f"ERROR: {result.error}",
-                            tool_call_id=tc.id,
-                            tool_name=tc.name,
-                        )
-                    )
-                    await self._persist(store, messages[-1:], sequence=len(messages))
+                    budget.record(response.input_tokens, response.output_tokens)
+                    await self._persist_assistant(store, messages, response, steps)
 
-                    if result.ok:
-                        circuit.record_success(tc.name)
-                        edit_tracker.record_success(tc.name)
-                    else:
-                        circuit.record_failure(tc.name)
-                        edit_tracker.record_failure(tc.name)
-                    repetition.record(tc.name, tc.arguments, self.tools[tc.name].is_mutating)
-                    if result.metadata.get("intentional") and result.metadata.get("path"):
-                        all_intentional.append(result.metadata["path"])
+                    last_assistant_content = response.content
 
-                    # Task 30: migration approval gate
-                    if tc.name == "run_command" and result.ok:
-                        gate = evaluate_migration_gate(tc.arguments.get("command", ""))
-                        if gate.trip:
-                            messages.append(Message(role="system", content=gate.guidance))
+                    # Parse tool calls (native + text)
+                    tool_calls = parse_tool_calls(response.content, response.tool_calls)
+                    if not tool_calls:
+                        # LLM decided it's done without calling finish — treat as finish
+                        finish_reason = "finished"
+                        break
+
+                    # Execute each tool
+                    step_should_exit = False
+                    for tc in tool_calls:
+                        if await self._is_finish_call(tc):
+                            finish_reason = "finished"
+                            messages.append(
+                                Message(role="tool", content="finish accepted", tool_call_id=tc.id, tool_name=tc.name)
+                            )
                             await self._persist(store, messages[-1:], sequence=len(messages))
-                            error_msg = gate.reason
-                            finish_reason = "awaiting_approval"
-                            # Mark the run as awaiting approval so resume works
-                            agent_run.status = "awaiting_approval"
+                            step_should_exit = True
+                            break
+
+                        with tracer.start_as_current_span("tool.execute") as tool_span:
+                            tool_span.set_attribute("tool_name", tc.name)
+                            result = await self._execute_tool(tc, config, available_tools, circuit, repetition, edit_tracker)
+                            tool_span.set_attribute("ok", result.ok)
+                        messages.append(
+                            Message(
+                                role="tool",
+                                content=result.output if result.ok else f"ERROR: {result.error}",
+                                tool_call_id=tc.id,
+                                tool_name=tc.name,
+                            )
+                        )
+                        await self._persist(store, messages[-1:], sequence=len(messages))
+
+                        if result.ok:
+                            circuit.record_success(tc.name)
+                            edit_tracker.record_success(tc.name)
+                        else:
+                            circuit.record_failure(tc.name)
+                            edit_tracker.record_failure(tc.name)
+                        repetition.record(tc.name, tc.arguments, self.tools[tc.name].is_mutating)
+                        if result.metadata.get("intentional") and result.metadata.get("path"):
+                            all_intentional.append(result.metadata["path"])
+
+                        # Task 30: migration approval gate
+                        if tc.name == "run_command" and result.ok:
+                            gate = evaluate_migration_gate(tc.arguments.get("command", ""))
+                            if gate.trip:
+                                messages.append(Message(role="system", content=gate.guidance))
+                                await self._persist(store, messages[-1:], sequence=len(messages))
+                                error_msg = gate.reason
+                                finish_reason = "awaiting_approval"
+                                # Mark the run as awaiting approval so resume works
+                                agent_run.status = "awaiting_approval"
                             await self.session.commit()
                             break
 
-                if step_should_exit:
-                    break
+                    if step_should_exit:
+                        break
 
-                # Check safety trip (after tool runs, before next LLM)
-                if circuit.tripped or repetition.tripped or edit_tracker.tripped:
-                    guidance = circuit.guidance_message() or repetition.guidance_message() or edit_tracker.guidance_message()
-                    if guidance:
-                        messages.append(Message(role="system", content=guidance))
-                        await self._persist(store, messages[-1:], sequence=len(messages))
-                        # Strip warning emoji for clean error field
-                        error_msg = guidance.lstrip("⚠️ ").strip()
-                    finish_reason = "safety_tripped"
-                    break
+                    # Check safety trip (after tool runs, before next LLM)
+                    if circuit.tripped or repetition.tripped or edit_tracker.tripped:
+                        with tracer.start_as_current_span("safety.check") as safety_span:
+                            tripped = []
+                            if circuit.tripped:
+                                tripped.append("circuit_breaker")
+                            if repetition.tripped:
+                                tripped.append("repetition")
+                            if edit_tracker.tripped:
+                                tripped.append("edit_tracker")
+                            safety_span.set_attribute("tripped_guards", ",".join(tripped))
+                        guidance = circuit.guidance_message() or repetition.guidance_message() or edit_tracker.guidance_message()
+                        if guidance:
+                            messages.append(Message(role="system", content=guidance))
+                            await self._persist(store, messages[-1:], sequence=len(messages))
+                            # Strip warning emoji for clean error field
+                            error_msg = guidance.lstrip("⚠️ ").strip()
+                        finish_reason = "safety_tripped"
+                        break
 
-                # Check token budget
-                try:
-                    await budget.check()
-                except TokenBudgetExceeded as e:
-                    finish_reason = "budget_exceeded"
+                    # Check token budget
+                    try:
+                        await budget.check()
+                    except TokenBudgetExceeded as e:
+                        finish_reason = "budget_exceeded"
+                        error_msg = str(e)
+                        break
+
+                    # Loop exited because steps >= max_steps without breaking for any other reason
+                    if finish_reason is None:
+                        finish_reason = "max_steps"
+
+            except Exception as e:
+                    logger.exception("AgentLoop crashed")
+                    finish_reason = "error"
                     error_msg = str(e)
-                    break
 
-            else:
-                # while-else: condition became False (max_steps reached)
-                if finish_reason is None:
-                    finish_reason = "max_steps"
+                # Persist final AgentRun update + record final span attrs (still inside `with`)
+            elapsed_ms = int((time.perf_counter() - start) * 1000)
+            final_status = finish_reason or "finished"
+            agent_run.status = final_status
+            agent_run.steps = steps
+            agent_run.input_tokens = budget.usage.input_tokens
+            agent_run.output_tokens = budget.usage.output_tokens
+            agent_run.cost_usd = 0.0
+            agent_run.duration_ms = elapsed_ms
+            agent_run.error = error_msg
+            agent_run.finished_at = datetime.now(timezone.utc)
+            await self.session.commit()
 
-        except Exception as e:
-            logger.exception("AgentLoop crashed")
-            finish_reason = "error"
-            error_msg = str(e)
+            run_span.set_attribute("finish_reason", final_status)
+            run_span.set_attribute("steps", steps)
+            run_span.set_attribute("input_tokens", budget.usage.input_tokens)
+            run_span.set_attribute("output_tokens", budget.usage.output_tokens)
+            run_span.set_attribute("duration_ms", elapsed_ms)
 
-        # Persist final AgentRun update
-        elapsed_ms = int((time.perf_counter() - start) * 1000)
-        final_status = finish_reason or "finished"
-        agent_run.status = final_status
-        agent_run.steps = steps
-        agent_run.input_tokens = budget.usage.input_tokens
-        agent_run.output_tokens = budget.usage.output_tokens
-        agent_run.cost_usd = 0.0
-        agent_run.duration_ms = elapsed_ms
-        agent_run.error = error_msg
-        agent_run.finished_at = datetime.now(timezone.utc)
-        await self.session.commit()
+            # Generate summary
+            summary = last_assistant_content or "Run finished without text output"
+            if final_status == "safety_tripped":
+                summary = f"[Safety tripped] {summary}"
+            if error_msg:
+                summary = f"[{final_status}] {summary}\n{error_msg}"
 
-        # Generate summary
-        summary = last_assistant_content or "Run finished without text output"
-        if final_status == "safety_tripped":
-            summary = f"[Safety tripped] {summary}"
-        if error_msg:
-            summary = f"[{final_status}] {summary}\n{error_msg}"
-
-        return AgentResult(
-            success=(final_status == "finished"),
-            agent_run_id=agent_run.id,
-            conversation_id=conversation.id,
-            summary=summary,
-            steps=steps,
-            input_tokens=budget.usage.input_tokens,
-            output_tokens=budget.usage.output_tokens,
-            cost_usd=0.0,
-            duration_ms=elapsed_ms,
-            intentional_files=all_intentional,
-            error=error_msg,
-            finish_reason=final_status,
-        )
+            return AgentResult(
+                success=(final_status == "finished"),
+                agent_run_id=agent_run.id,
+                conversation_id=conversation.id,
+                summary=summary,
+                steps=steps,
+                input_tokens=budget.usage.input_tokens,
+                output_tokens=budget.usage.output_tokens,
+                cost_usd=0.0,
+                duration_ms=elapsed_ms,
+                intentional_files=all_intentional,
+                error=error_msg,
+                finish_reason=final_status,
+            )
 
     # -----------------------------------------------------------------------
     # Helpers

@@ -1,25 +1,48 @@
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.api.routes import router as agent_router
+from app.agent.observability import init_tracing
 from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.invitations import router as invitations_router
 from app.api.v1.keys import router as keys_router
 from app.api.v1.orgs import router as orgs_router
 from app.api.v1.settings import router as settings_router
+from app.config import get_settings
+from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS, metrics_response
+from app.deps import get_current_user
 from app.workflow.api.routes import dlq_router, processes_router, router as process_router
 from app.workflow.api.task_routes import (
     activity_router,
     notifications_router,
     tasks_router,
 )
-from app.config import get_settings
-from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS, metrics_response
-from app.deps import get_current_user
+import logging
 import time
 
+logger = logging.getLogger(__name__)
+
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # noqa: ARG001
+    """Initialize OpenTelemetry tracing + FastAPI auto-instrumentation on startup."""
+    try:
+        init_tracing("apexai-api")
+        # Auto-instrument FastAPI so HTTP requests get a parent span
+        # (children like agent.run inherit trace context).
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        FastAPIInstrumentor.instrument_app(app)
+        logger.info("OpenTelemetry tracing initialized")
+    except Exception:
+        logger.exception("Failed to initialize tracing — continuing without spans")
+    yield
+
 
 app = FastAPI(
     title="ApexAI API",
@@ -28,6 +51,7 @@ app = FastAPI(
     openapi_url="/api/v1/openapi.json",
     docs_url="/api/v1/docs",
     redoc_url="/api/v1/redoc",
+    lifespan=lifespan,
 )
 
 

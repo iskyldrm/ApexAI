@@ -1,5 +1,11 @@
-"""Activity log helper — writes to the audit_log table."""
+"""Activity log + tracing helpers."""
 from app.core.audit import audit
+from app.agent.observability.tracing import (
+    get_in_memory_exporter,
+    init_tracing,
+    reset_in_memory_exporter,
+    tracer,
+)
 
 
 async def log_agent_event(
@@ -23,3 +29,12 @@ async def log_agent_event(
         org_id=org_id,
         metadata={"role": role, **(metadata or {})},
     )
+
+
+__all__ = [
+    "init_tracing",
+    "get_in_memory_exporter",
+    "reset_in_memory_exporter",
+    "tracer",
+    "log_agent_event",
+]
