@@ -1,0 +1,55 @@
+name: CD
+
+# Continuous Deployment — triggered manually or via workflow_dispatch.
+# In production, replace the kubectl steps with your CD tool
+# (ArgoCD, Flux, Spinnaker) and update the docker-compose path.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (staging | production)'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: 'Image tag to deploy (default = latest CI build)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  deploy-compose:
+    name: Deploy via docker-compose
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull latest images
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          TAG="${TAG:-latest}"
+          docker pull ghcr.io/${{ github.repository_owner }}/apexai-backend:${TAG}
+          docker pull ghcr.io/${{ github.repository_owner }}/apexai-frontend:${TAG}
+      - name: Apply env + restart
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # In real prod, use Ansible / Terraform / kubectl instead.
+          # This example uses docker compose on a remote host via SSH.
+          echo "Deploying ${{ github.event.inputs.environment }}…"
+          # ssh -o StrictHostKeyChecking=no deploy@apex-${{ github.event.inputs.environment }} "
+          #   cd /opt/apexai &&
+          #   cp /opt/secrets/.env.prod .env.prod &&
+          #   TAG=$TAG docker compose -f docker-compose.prod.yml up -d
+          # "
+          echo "(Replace this step with your actual rollout mechanism.)"
+      - name: Smoke-test
+        run: |
+          sleep 10
+          curl -fsS https://api.${{ github.event.inputs.environment }}.yourdomain.com/health | jq .
