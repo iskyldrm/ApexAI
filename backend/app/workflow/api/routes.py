@@ -28,6 +28,7 @@ from app.schemas.process import (
     ProcessResponse,
     ProcessStepResponse,
 )
+from app.workflow.dag import DAGValidationError, validate_dag
 from app.workflow.definition import ProcessDefinition
 from app.workflow.state import (
     InvalidTransition,
@@ -57,6 +58,12 @@ async def create_process(
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid process definition: {e}")
+
+    # Validate DAG structure (no cycles, unique names, valid edge endpoints)
+    try:
+        validate_dag(pdef.model_dump())
+    except DAGValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     process = Process(
         name=body.name,
