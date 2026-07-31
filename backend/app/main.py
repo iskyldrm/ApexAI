@@ -23,6 +23,7 @@ from app.workflow.api.task_routes import (
     notifications_router,
     tasks_router,
 )
+from app.notifications.api import router as notifications_ws_router
 import logging
 import time
 
@@ -120,6 +121,7 @@ app.include_router(activity_router, prefix="/api/v1")  # /activity-feed
 app.include_router(cost_router)  # /api/v1/cost/* (tiers, usage, alerts)
 app.include_router(test_runs_router)  # /api/v1/test-runs/* (Sub-System E)
 app.include_router(scheduled_router, prefix="/api/v1")  # scheduled-processes + workflow-templates
+app.include_router(notifications_ws_router)  # /ws/tasks WebSocket (Sub-System C hardening)
 
 
 @app.get("/health")

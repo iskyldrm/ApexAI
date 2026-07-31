@@ -81,10 +81,58 @@ class Task(BaseModel, table=True):
         default_factory=dict,
         sa_column=Column("metadata", JSONB, nullable=False, server_default="{}"),
     )
+    parent_id: UUID | None = Field(
+        default=None,
+        sa_column=Column(
+            PgUUID(as_uuid=True),
+            ForeignKey("tasks.id", ondelete="CASCADE"),
+            nullable=True,
+            index=True,
+        ),
+        description="Parent task id (for sub-tasks)",
+    )
 
     __table_args__ = (
         Index("ix_tasks_org_status", "org_id", "status"),
         Index("ix_tasks_assignee_status", "assignee_id", "status"),
+        Index("ix_tasks_parent", "parent_id"),
+    )
+
+
+class TaskDependency(BaseModel, table=True):
+    """Dependency edge: blocker_id must be done before blocked_id can start."""
+
+    __tablename__ = "task_dependencies"
+
+    blocker_id: UUID = Field(
+        sa_column=Column(
+            PgUUID(as_uuid=True),
+            ForeignKey("tasks.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+    )
+    blocked_id: UUID = Field(
+        sa_column=Column(
+            PgUUID(as_uuid=True),
+            ForeignKey("tasks.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+    )
+    meta: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column("metadata", JSONB, nullable=False, server_default="{}"),
+    )
+
+    __table_args__ = (
+        # blocker != blocked
+        Index(
+            "ix_task_dependencies_blocker_blocked",
+            "blocker_id",
+            "blocked_id",
+            unique=True,
+        ),
     )
 
 

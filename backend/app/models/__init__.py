@@ -18,7 +18,7 @@ from app.models.org import Org
 from app.models.platform_admin import PlatformAdmin
 from app.models.process import Process, ProcessDLQ, ProcessEvent, ProcessStep, ScheduledProcess, WorkflowTemplate
 from app.models.setting import Setting
-from app.models.task import Notification, Task, TaskComment
+from app.models.task import Notification, Task, TaskComment, TaskDependency
 from app.models.team import Team
 from app.models.testing import TestRun, TestRunRecord
 from app.models.token_usage import TokenUsage
