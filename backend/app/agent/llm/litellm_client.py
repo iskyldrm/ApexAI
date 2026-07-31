@@ -10,6 +10,12 @@ Provider resolution is env-driven:
 - ``OLLAMA_BASE_URL`` → Ollama (OpenAI-compatible) at /v1
 - ``ANTHROPIC_BASE_URL`` + ``ANTHROPIC_AUTH_TOKEN`` → Anthropic-compatible
   (your MiniMax or any other gateway)
+
+Caching:
+- An optional Redis-backed cache (with in-memory fallback) deduplicates
+  identical completions. See ``app.agent.cache.LLMCache``.
+- Disabled via ``APEXAI_LLM_CACHE_DISABLED=1`` or by passing ``cache=None``.
+- Tool schemas are part of the cache key — any change invalidates.
 """
 from __future__ import annotations
 
@@ -18,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from app.agent.cache import LLMCache, get_llm_cache
 from app.agent.llm.pricing import estimate_cost
 
 
@@ -49,9 +56,23 @@ class LiteLLMClient:
     - Otherwise: provider is whatever the model string says (e.g. ``gpt-4o``)
     """
 
-    def __init__(self, token_callback: TokenCallback | None = None) -> None:
+    def __init__(
+        self,
+        token_callback: TokenCallback | None = None,
+        cache: LLMCache | None = None,
+    ) -> None:
         self._callback = token_callback
         self._provider = self._detect_provider()
+        # Use the supplied cache or the module singleton. Pass ``cache=None``
+        # explicitly to disable caching for this client (used in tests).
+        self._cache: LLMCache | None
+        if cache is None:
+            try:
+                self._cache = get_llm_cache()
+            except Exception:
+                self._cache = None
+        else:
+            self._cache = cache
 
     @staticmethod
     def _detect_provider() -> str:
@@ -104,14 +125,35 @@ class LiteLLMClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         api_key: str | None = None,
+        *,
+        org_id: str | None = None,
+        cache_ttl_seconds: int | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Run a chat completion. Returns an LLMResponse.
 
         Provider is auto-detected from env (Ollama > Anthropic-compat > raw).
         Explicit ``api_key`` overrides the env-derived one.
+
+        If a cache is enabled and the same call was made before, returns the
+        cached response without contacting the LLM provider. ``org_id`` is
+        included in the cache key so multi-tenant usage stays isolated.
         """
         import litellm
+
+        # Cache lookup (best-effort, never raises)
+        cache_key: str | None = None
+        if self._cache is not None:
+            try:
+                cache_key = LLMCache.make_key(
+                    model=model, messages=messages, tools=tools, org_id=org_id
+                )
+                cached = await self._cache.get(cache_key)
+                if cached is not None:
+                    cached.raw = None  # not serializable
+                    return cached
+            except Exception as e:
+                logger.debug("Cache lookup failed: %s", e)
 
         litellm_model, _resolved_key, call_kwargs = self._resolve_call_kwargs(
             model, messages, tools, api_key, kwargs
@@ -163,7 +205,7 @@ class LiteLLMClient:
             except Exception:
                 pass  # never let callback errors break the LLM call
 
-        return LLMResponse(
+        llm_response = LLMResponse(
             content=msg.content or "",
             tool_calls=tool_calls,
             finish_reason=getattr(choice, "finish_reason", "stop") or "stop",
@@ -173,3 +215,12 @@ class LiteLLMClient:
             model=model,
             raw=response,
         )
+
+        # Cache the successful response (best-effort)
+        if self._cache is not None and cache_key is not None:
+            try:
+                await self._cache.set(cache_key, llm_response, ttl_seconds=cache_ttl_seconds)
+            except Exception as e:
+                logger.debug("Cache set failed: %s", e)
+
+        return llm_response
