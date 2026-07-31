@@ -19,7 +19,7 @@ _BLOCKLIST_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bdd\s+if="),
     re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"),
     re.compile(r":\(\)\s*\{.*\};:"),  # fork bomb
-    re.compile(r"\b>\s*/dev/sd[a-z]\b"),
+    re.compile(r">\s*/dev/sd[a-z]\b"),
     re.compile(r"\bshutdown\b|\breboot\b|\bpoweroff\b"),
 )
 
