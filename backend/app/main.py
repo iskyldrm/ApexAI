@@ -17,6 +17,7 @@ from app.config import get_settings
 from app.core.metrics import HTTP_LATENCY, HTTP_REQUESTS, metrics_response
 from app.deps import get_current_user
 from app.workflow.api.routes import dlq_router, processes_router, router as process_router
+from app.workflow.api.scheduled_routes import router as scheduled_router
 from app.workflow.api.task_routes import (
     activity_router,
     notifications_router,
@@ -118,6 +119,7 @@ app.include_router(notifications_router, prefix="/api/v1")  # /notifications
 app.include_router(activity_router, prefix="/api/v1")  # /activity-feed
 app.include_router(cost_router)  # /api/v1/cost/* (tiers, usage, alerts)
 app.include_router(test_runs_router)  # /api/v1/test-runs/* (Sub-System E)
+app.include_router(scheduled_router, prefix="/api/v1")  # scheduled-processes + workflow-templates
 
 
 @app.get("/health")

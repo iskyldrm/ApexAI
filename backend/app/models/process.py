@@ -243,3 +243,46 @@ class ProcessDLQ(BaseModel, table=True):
             postgresql_where=Column("resolved_at").is_(None),
         ),
     )
+
+
+class ScheduledProcess(BaseModel, table=True):
+    """A cron-scheduled trigger for a process definition."""
+
+    __tablename__ = "scheduled_processes"
+
+    process_id: UUID = Field(
+        sa_column=Column(
+            PgUUID(as_uuid=True),
+            ForeignKey("processes.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+    )
+    org_id: str | None = Field(default=None, index=True)
+    cron_expr: str = Field(default="0 9 * * *", sa_column=Column(String(64), nullable=False))
+    enabled: bool = Field(default=True)
+    last_run_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime, nullable=True),
+    )
+    next_run_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(DateTime, nullable=True),
+    )
+
+
+class WorkflowTemplate(BaseModel, table=True):
+    """A reusable process definition template."""
+
+    __tablename__ = "workflow_templates"
+
+    name: str = Field(sa_column=Column(String(128), nullable=False, index=True))
+    category: str = Field(
+        default="custom",
+        sa_column=Column(String(64), nullable=False, index=True),
+    )
+    description: str = Field(default="", sa_column=Column(Text, nullable=False))
+    definition: dict[str, Any] = Field(
+        default_factory=dict,
+        sa_column=Column(JSONB, nullable=False, server_default="{}"),
+    )
