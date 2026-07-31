@@ -20,6 +20,7 @@ from app.models.process import Process, ProcessDLQ, ProcessEvent, ProcessStep
 from app.models.setting import Setting
 from app.models.task import Notification, Task, TaskComment
 from app.models.team import Team
+from app.models.testing import TestRun, TestRunRecord
 from app.models.token_usage import TokenUsage
 from app.models.user import User
 
