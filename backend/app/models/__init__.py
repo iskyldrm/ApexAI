@@ -1,5 +1,6 @@
 from app.models.agent_run import AgentRun
 from app.models.agent_run_checkpoint import AgentRunCheckpoint
+from app.models.budget_alert import BudgetAlert
 from app.models.agent_todo import AgentTodo
 from app.models.api_key import ApiKey
 from app.models.audit_log import AuditLog

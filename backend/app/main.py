@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agent.api.routes import router as agent_router
 from app.agent.observability import init_tracing
+from app.cost.api import router as cost_router
 from app.api.v1.audit import router as audit_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.invitations import router as invitations_router
@@ -114,6 +115,7 @@ app.include_router(dlq_router, prefix="/api/v1")  # /process-dlq
 app.include_router(tasks_router, prefix="/api/v1")  # /tasks
 app.include_router(notifications_router, prefix="/api/v1")  # /notifications
 app.include_router(activity_router, prefix="/api/v1")  # /activity-feed
+app.include_router(cost_router)  # /api/v1/cost/* (tiers, usage, alerts)
 
 
 @app.get("/health")
