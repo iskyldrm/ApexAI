@@ -26,6 +26,11 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from uuid import UUID, uuid4
 
+from app.agent.checkpoint import (
+    CHECKPOINT_EVERY_N_STEPS,
+    load_latest_checkpoint,
+    save_checkpoint,
+)
 from app.agent.gates import evaluate_migration_gate
 from app.agent.llm.litellm_client import LLMResponse, LiteLLMClient
 from app.agent.memory import ConversationStore, Message, extractive_summary, maybe_summarize, trim
@@ -120,16 +125,29 @@ class AgentLoop:
         max_steps = config.max_steps or role_cfg.max_steps
         model = config.model or role_cfg.resolve_model()
 
-        # Persist Conversation + AgentRun
-        conversation, agent_run = await self._ensure_conversation(config, role_cfg, model)
+        # Persist Conversation + AgentRun (or load for resume)
+        conversation, agent_run, resume_state = await self._ensure_conversation(
+            config, role_cfg, model
+        )
         store = ConversationStore(self.session, conversation.id)
 
-        # In-memory message list (mirror of DB rows for the LLM)
-        messages: list[Message] = [
-            Message(role="system", content=role_cfg.system_prompt),
-            Message(role="user", content=config.user_prompt),
-        ]
-        await self._persist(store, messages)
+        # Build initial message list (or restore from conversation for resume)
+        if resume_state and config.resume_conversation_id:
+            # Reload full conversation history (already persisted)
+            from app.agent.memory import load_conversation
+
+            messages = await load_conversation(self.session, conversation.id)
+            logger.info(
+                "Resuming conversation %s from step %s",
+                conversation.id,
+                resume_state.get("input_tokens"),
+            )
+        else:
+            messages: list[Message] = [
+                Message(role="system", content=role_cfg.system_prompt),
+                Message(role="user", content=config.user_prompt),
+            ]
+            await self._persist(store, messages)
 
         # Build tool schemas (filtered to this role)
         available_tools = self._available_tools(config.role)
@@ -151,6 +169,18 @@ class AgentLoop:
         finish_reason: str | None = None
         error_msg: str | None = None
 
+        # Seed bookkeeping from the resume checkpoint (A.9 — failure recovery)
+        if resume_state:
+            try:
+                restored_step = int(resume_state.get("step", 0))
+                if restored_step:
+                    steps = restored_step
+                restored_files = resume_state.get("intentional_files") or []
+                if restored_files:
+                    all_intentional = list(restored_files)
+            except (TypeError, ValueError):
+                logger.warning("Invalid resume_state, ignoring: %r", resume_state)
+
         with tracer.start_as_current_span("agent.run") as run_span:
             run_span.set_attribute("agent_run_id", str(agent_run.id))
             run_span.set_attribute("role", config.role.value)
@@ -164,6 +194,24 @@ class AgentLoop:
 
                     # Trim if needed
                     messages = maybe_summarize(trim(messages, max_messages=30), threshold=50)
+
+                    # Periodic checkpoint (A.9 — failure recovery)
+                    if steps % CHECKPOINT_EVERY_N_STEPS == 0:
+                        try:
+                            await save_checkpoint(
+                                self.session,
+                                agent_run_id=agent_run.id,
+                                step=steps,
+                                state={
+                                    "input_tokens": budget.usage.input_tokens,
+                                    "output_tokens": budget.usage.output_tokens,
+                                    "intentional_files": list(all_intentional),
+                                    "last_assistant_content_preview": last_assistant_content[:200],
+                                },
+                            )
+                            await self.session.commit()
+                        except Exception:
+                            logger.exception("Checkpoint save failed (non-fatal)")
 
                     # Call LLM
                     llm_dicts = [m.to_llm_dict() for m in messages]
@@ -333,7 +381,12 @@ class AgentLoop:
 
     async def _ensure_conversation(
         self, config: AgentLoopConfig, role_cfg, model: str
-    ) -> tuple[Conversation, AgentRun]:
+    ) -> tuple[Conversation, AgentRun, dict]:
+        """Return (conversation, agent_run, resume_state).
+
+        ``resume_state`` is empty for new runs, populated from the latest
+        checkpoint for resumed runs.
+        """
         if config.resume_conversation_id:
             conversation = await self.session.get(Conversation, config.resume_conversation_id)
             if conversation is None:
@@ -341,7 +394,15 @@ class AgentLoop:
             agent_run = await self.session.get(AgentRun, config.resume_agent_run_id)
             if agent_run is None:
                 raise ValueError(f"Resume agent_run {config.resume_agent_run_id} not found")
-            return conversation, agent_run
+            # Load latest checkpoint (A.9 — failure recovery)
+            checkpoint = await load_latest_checkpoint(self.session, agent_run.id)
+            resume_state = checkpoint.state if checkpoint is not None else {}
+            # Reset status so the loop can re-write it on exit
+            agent_run.status = "running"
+            agent_run.error = None
+            agent_run.finished_at = None
+            await self.session.commit()
+            return conversation, agent_run, resume_state
 
         conversation = Conversation(
             role=config.role.value,
@@ -363,7 +424,7 @@ class AgentLoop:
         )
         self.session.add(agent_run)
         await self.session.commit()
-        return conversation, agent_run
+        return conversation, agent_run, {}
 
     def _available_tools(self, role: Role) -> list[Tool]:
         role_cfg = get_role_config(role)

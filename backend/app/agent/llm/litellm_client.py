@@ -59,14 +59,18 @@ class LiteLLMClient:
     def __init__(
         self,
         token_callback: TokenCallback | None = None,
-        cache: LLMCache | None = None,
+        cache: LLMCache | "UNSET" | None = "UNSET",
     ) -> None:
         self._callback = token_callback
         self._provider = self._detect_provider()
-        # Use the supplied cache or the module singleton. Pass ``cache=None``
-        # explicitly to disable caching for this client (used in tests).
+        # Cache resolution:
+        # - cache is an LLMCache instance → use it
+        # - cache is None → explicitly disabled (used in tests)
+        # - cache is "UNSET" (default) → use the module singleton
         self._cache: LLMCache | None
         if cache is None:
+            self._cache = None
+        elif cache == "UNSET":
             try:
                 self._cache = get_llm_cache()
             except Exception:

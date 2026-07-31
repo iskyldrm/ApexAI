@@ -305,6 +305,19 @@ def export_conversation(messages: Iterable[Message]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def load_conversation(
+    session: AsyncSession,
+    conversation_id: UUID,
+) -> list[Message]:
+    """Reload all messages of a conversation from the DB, in order.
+
+    Used by the resume flow (A.9 — failure recovery) so a restarted
+    ``AgentLoop`` picks up where the previous (crashed) loop left off.
+    """
+    store = ConversationStore(session, conversation_id)
+    return await store.get_messages()
+
+
 class ConversationStore:
     """Async wrapper around `conversation_messages` table."""
 

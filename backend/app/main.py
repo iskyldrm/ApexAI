@@ -41,6 +41,21 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
         logger.info("OpenTelemetry tracing initialized")
     except Exception:
         logger.exception("Failed to initialize tracing — continuing without spans")
+
+    # A.9 — Failure recovery: mark any stuck agent_runs as interrupted on startup.
+    # Runs that have been in 'running' state for over an hour with no
+    # progress almost certainly crashed. Resumable via POST /agent/runs/{id}/resume.
+    try:
+        from app.agent.checkpoint import mark_stuck_runs_interrupted
+        from app.db import async_session_maker
+
+        async with async_session_maker() as session:
+            n = await mark_stuck_runs_interrupted(session, threshold_seconds=3600)
+            if n:
+                logger.warning("Startup: marked %d stuck agent runs as interrupted", n)
+    except Exception:
+        logger.exception("Startup stuck-run cleanup failed (non-fatal)")
+
     yield
 
 
